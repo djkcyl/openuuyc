@@ -157,7 +157,7 @@ impl AuthenticatedClient {
         let time = current
             .iter()
             .find(|d| d.connect_id == id)
-            .map(|d| d.favorited_at)
+            .and_then(|d| d.favorited_at)
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
         let item = FavoriteItem {
             connect_id: &id,

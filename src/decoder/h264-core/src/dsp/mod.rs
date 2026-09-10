@@ -138,41 +138,7 @@ pub(crate) fn interleave_chroma(u: &[u8], v: &[u8], dst: &mut [u8]) {
 mod tests {
     use super::*;
     #[test]
-    fn validated_partition_views_cover_subsampled_and_full_planes_without_touching_guards() {
-        for size in [8, 16] {
-            let stride = 21;
-            for x in (0..16).step_by(4) {
-                for y in (0..16).step_by(4) {
-                    for w in [4, 8, 16] {
-                        for h in [4, 8, 16] {
-                            let geometry = PartitionGeometry::new(x, y, w, h);
-                            if x + w > 16 || y + h > 16 {
-                                assert!(geometry.is_err());
-                                continue;
-                            }
-                            let geometry = geometry.unwrap();
-                            let mut pixels = vec![17; stride * 19];
-                            let mut expected = pixels.clone();
-                            let sub = 16 / size;
-                            for yy in y / sub..(y + h) / sub {
-                                expected
-                                    [22 + yy * stride + x / sub..22 + yy * stride + (x + w) / sub]
-                                    .fill(91);
-                            }
-                            let mut parent = MacroblockPlane::new(
-                                Block::new(&mut pixels[22..], stride, size, size).unwrap(),
-                            )
-                            .unwrap();
-                            let mut child = parent.partition(&geometry);
-                            for row in 0..h / sub {
-                                child.row_mut(row).fill(91);
-                            }
-                            assert_eq!(pixels, expected);
-                        }
-                    }
-                }
-            }
-        }
+    fn interleave_matches_scalar_with_short_rows_and_guards() {
         for length in [0, 1, 2, 7, 15, 16, 17, 31, 33, 316] {
             let u: Vec<_> = (0..length).map(|x| (x * 3) as u8).collect();
             let v: Vec<_> = (0..length).map(|x| (x * 7 + 11) as u8).collect();

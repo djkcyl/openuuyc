@@ -219,18 +219,16 @@ impl DeviceCenterApp {
                                                 .truncate(),
                                             )
                                             .on_hover_text(item.title());
-                                            let detail = if !favorites && item.last_connected_at > 0
-                                            {
-                                                let time = chrono::DateTime::from_timestamp(
-                                                    item.last_connected_at,
-                                                    0,
-                                                )
-                                                .map(|t| {
-                                                    t.with_timezone(&chrono::Local)
-                                                        .format("%m-%d %H:%M")
-                                                        .to_string()
-                                                })
-                                                .unwrap_or_default();
+                                            let time = item
+                                                .last_connected_at
+                                                .filter(|&t| !favorites && t > 0)
+                                                .and_then(|t| {
+                                                    chrono::DateTime::from_timestamp(t, 0)
+                                                });
+                                            let detail = if let Some(time) = time {
+                                                let time = time
+                                                    .with_timezone(&chrono::Local)
+                                                    .format("%m-%d %H:%M");
                                                 format!("{}  ·  {}", item.connect_id, time)
                                             } else {
                                                 item.connect_id.clone()

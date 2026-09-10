@@ -129,9 +129,9 @@ pub(crate) struct SavedDevice {
     #[serde(default)]
     pub is_favorite: bool,
     #[serde(default)]
-    pub last_connected_at: i64,
+    pub last_connected_at: Option<i64>,
     #[serde(default)]
-    pub favorited_at: i64,
+    pub favorited_at: Option<i64>,
     #[serde(skip)]
     pub saved_code: String,
 }

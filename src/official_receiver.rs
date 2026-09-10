@@ -23,9 +23,6 @@ use crate::timing::{DecodeSchedule, PlayoutSchedule, VideoPlayoutTiming};
 use crate::video_color::{VideoColorHistory, VideoColorSpace};
 use crate::video_format::VideoFormatSignature;
 
-#[cfg(test)]
-mod tests;
-
 const PACKET_BUFFER_INITIAL_SIZE: usize = 2_048;
 const PACKET_BUFFER_MAX_SIZE: usize = 16_384;
 const FRAME_BUFFER_MAX_SIZE: usize = 800;

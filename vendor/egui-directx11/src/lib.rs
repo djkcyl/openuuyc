@@ -48,7 +48,6 @@ pub struct Renderer {
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
     rasterizer_state: ID3D11RasterizerState,
-    sampler_state: ID3D11SamplerState,
     blend_state: ID3D11BlendState,
 
     texture_pool: TexturePool,
@@ -136,7 +135,6 @@ impl Renderer {
         let mut vertex_shader = None;
         let mut pixel_shader = None;
         let mut rasterizer_state = None;
-        let mut sampler_state = None;
         let mut blend_state = None;
         unsafe {
             device.CreateInputLayout(
@@ -147,7 +145,6 @@ impl Renderer {
             device.CreateVertexShader(Self::VS_BLOB, None, Some(&mut vertex_shader))?;
             device.CreatePixelShader(Self::PS_BLOB, None, Some(&mut pixel_shader))?;
             device.CreateRasterizerState(&Self::RASTERIZER_DESC, Some(&mut rasterizer_state))?;
-            device.CreateSamplerState(&Self::SAMPLER_DESC, Some(&mut sampler_state))?;
             device.CreateBlendState(&Self::BLEND_DESC, Some(&mut blend_state))?;
         };
         Ok(Self {
@@ -156,9 +153,8 @@ impl Renderer {
             vertex_shader: vertex_shader.unwrap(),
             pixel_shader: pixel_shader.unwrap(),
             rasterizer_state: rasterizer_state.unwrap(),
-            sampler_state: sampler_state.unwrap(),
             blend_state: blend_state.unwrap(),
-            texture_pool: TexturePool::new(device),
+            texture_pool: TexturePool::new(device)?,
             prepared_meshes: Vec::new(),
             pending_texture_frees: Vec::new(),
         })
@@ -428,7 +424,6 @@ impl Renderer {
                 MinDepth: 0.,
                 MaxDepth: 1.,
             }]));
-            ctx.PSSetSamplers(0, Some(&[Some(self.sampler_state.clone())]));
             ctx.OMSetRenderTargets(Some(&[Some(render_target.clone())]), None);
             ctx.OMSetBlendState(&self.blend_state, Some(&[0.; 4]), u32::MAX);
         }
@@ -455,8 +450,11 @@ impl Renderer {
                 bottom: mesh.clip_rect.bottom() as _,
             }]));
         }
-        if let Some(srv) = texture_pool.get_srv(mesh.tex) {
-            unsafe { device_context.PSSetShaderResources(0, Some(&[Some(srv)])) };
+        if let Some((srv, sampler)) = texture_pool.binding(mesh.tex) {
+            unsafe {
+                device_context.PSSetShaderResources(0, Some(&[Some(srv)]));
+                device_context.PSSetSamplers(0, Some(&[Some(sampler)]));
+            }
         } else {
             log::warn!(
                 concat!(
@@ -465,6 +463,7 @@ impl Renderer {
                 ),
                 mesh.tex
             );
+            return;
         };
         unsafe { device_context.DrawIndexed(mesh.index_count, 0, 0) };
     }
@@ -515,16 +514,6 @@ impl Renderer {
         ScissorEnable: BOOL(1),
         MultisampleEnable: BOOL(0),
         AntialiasedLineEnable: BOOL(0),
-    };
-
-    const SAMPLER_DESC: D3D11_SAMPLER_DESC = D3D11_SAMPLER_DESC {
-        Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-        AddressU: D3D11_TEXTURE_ADDRESS_BORDER,
-        AddressV: D3D11_TEXTURE_ADDRESS_BORDER,
-        AddressW: D3D11_TEXTURE_ADDRESS_BORDER,
-        ComparisonFunc: D3D11_COMPARISON_ALWAYS,
-        BorderColor: [1., 1., 1., 1.],
-        ..zeroed()
     };
 
     const BLEND_DESC: D3D11_BLEND_DESC = D3D11_BLEND_DESC {

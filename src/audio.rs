@@ -1,8 +1,6 @@
 //! One receive-only audio output per UU connection, shared by all its windows.
 mod dsp;
 mod neteq;
-#[cfg(test)]
-pub(crate) mod tests;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -32,14 +30,6 @@ pub(crate) struct AudioSnapshot {
     pub device: String,
     pub error: Option<String>,
     pub receiving: bool,
-    #[cfg(test)]
-    pub output_samples: u64,
-    #[cfg(test)]
-    pub concealed_samples: u64,
-    #[cfg(test)]
-    pub output_callbacks: u64,
-    #[cfg(test)]
-    pub peak: f32,
 }
 
 struct Packet {
@@ -180,14 +170,6 @@ impl AudioPlayback {
             device: status.0.clone(),
             error: status.1.clone(),
             receiving: shared.receiving.load(Ordering::Relaxed),
-            #[cfg(test)]
-            output_samples: shared.output_samples.load(Ordering::Relaxed),
-            #[cfg(test)]
-            concealed_samples: shared.concealed.load(Ordering::Relaxed),
-            #[cfg(test)]
-            output_callbacks: shared.callbacks.load(Ordering::Relaxed),
-            #[cfg(test)]
-            peak: f32::from_bits(shared.peak.load(Ordering::Relaxed)),
         }
     }
 

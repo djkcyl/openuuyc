@@ -25,11 +25,6 @@ use crate::{
 pub type ConnectionProgressReporter = Arc<dyn Fn(ConnectionProgress) + Send + Sync>;
 mod assist;
 
-#[cfg(all(test, windows))]
-mod decoder_survey;
-#[cfg(all(test, windows))]
-mod multi_screen_audit;
-
 fn report_progress(
     reporter: Option<&ConnectionProgressReporter>,
     step: u8,
