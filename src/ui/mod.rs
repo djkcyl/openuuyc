@@ -7,6 +7,7 @@ pub(crate) mod d3d11;
 mod windows;
 
 mod app;
+pub(crate) mod branding;
 use app::AppFactory;
 #[cfg(windows)]
 use app::AppSession;

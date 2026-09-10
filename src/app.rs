@@ -24,6 +24,7 @@ mod assist;
 mod catalog;
 mod diagnostics;
 mod phone;
+mod updates;
 mod view;
 use assist::{AssistOperation, AssistResult, AssistUi};
 use phone::{LoginMethod, PhoneForm};
@@ -58,6 +59,7 @@ pub fn run(options: GuiOptions) -> Result<()> {
     let refresh_interval = options.refresh_interval.max(MIN_REFRESH_INTERVAL);
     let viewport = egui::ViewportBuilder::default()
         .with_title(format!("{} · 控制中心", crate::APP_NAME))
+        .with_icon(crate::ui::branding::icon())
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([900.0, 620.0]);
     crate::ui::run(
@@ -70,6 +72,7 @@ pub fn run(options: GuiOptions) -> Result<()> {
             configure_visuals(ctx);
             ctx.request_repaint();
             let mut app = DeviceCenterApp::new(
+                ctx,
                 refresh_interval,
                 local_display,
                 options.media,
@@ -86,6 +89,8 @@ pub fn run(options: GuiOptions) -> Result<()> {
 }
 
 struct DeviceCenterApp {
+    brand_texture: egui::TextureHandle,
+    updates: updates::UpdateCheck,
     center_ui: CenterUi,
     assist: AssistUi,
     worker: GuiWorker,
@@ -126,6 +131,7 @@ struct DeviceCenterApp {
 
 impl DeviceCenterApp {
     fn new(
+        ctx: &egui::Context,
         refresh_interval: Duration,
         local_display: LocalDisplayInfo,
         media: ConnectionMediaOptions,
@@ -134,6 +140,8 @@ impl DeviceCenterApp {
         display_warning: Option<String>,
     ) -> Self {
         Self {
+            brand_texture: crate::ui::branding::load_texture(ctx),
+            updates: updates::UpdateCheck::start(ctx),
             center_ui: CenterUi::default(),
             assist: AssistUi::default(),
             worker: GuiWorker::spawn(refresh_interval),
@@ -176,6 +184,7 @@ impl DeviceCenterApp {
     }
 
     fn drain_events(&mut self, ctx: &egui::Context) {
+        self.updates.poll();
         self.diagnostics.poll();
         while let Ok(event) = self.worker.events.try_recv() {
             match event {
@@ -668,11 +677,10 @@ impl DeviceCenterApp {
 
     fn show_in_watching_list(&self, device: &DeviceInfo) -> bool {
         matches!(device.platform, 1 | 4)
-            && (self.center_ui.show_virtual()
-                || self
-                    .catalog
-                    .as_ref()
-                    .is_none_or(|c| !c.is_virtual(&device.device_id)))
+            && self
+                .catalog
+                .as_ref()
+                .is_none_or(|c| !c.is_virtual(&device.device_id))
     }
 
     fn open_details(&mut self, id: String) {

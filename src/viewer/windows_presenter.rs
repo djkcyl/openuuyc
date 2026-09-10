@@ -107,6 +107,7 @@ fn run_player(config: ConnectingWindowsRunConfig, needs_display: bool) -> Result
     let mut runner = ConnectingWindowsRunner {
         attributes: WindowAttributes::default()
             .with_title(format!("{}{}", crate::VIEWER_TITLE_PREFIX, config.alias))
+            .with_window_icon(Some(crate::ui::branding::window_icon()))
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1280.0, 760.0))
             .with_min_inner_size(LogicalSize::new(760.0, 520.0)),
@@ -162,6 +163,7 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match event_loop.create_window(self.attributes.clone()) {
             Ok(window) => {
+                crate::ui::branding::set_taskbar_icon(&window);
                 configure_dwm_window(&window);
                 let progress = self
                     .progress

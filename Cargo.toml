@@ -1,8 +1,8 @@
 [package]
 name = "openuuyc"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "OpenUUYC - cross-platform native UU Remote client"
+description = "Third-party Rust client for UU Remote protocol interoperability"
 license-file = "LICENSE"
 publish = false
 default-run = "OpenUUYC"
@@ -28,6 +28,7 @@ flate2 = "1.1"
 futures-util = "0.3.34"
 hmac = "0.12.1"
 hyper = { version = "1.10.1", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 keyring = "4.1.6"
 kcp = { path = "vendor/kcp" }
 mediaway-common = "=0.1.8"
@@ -40,6 +41,7 @@ rustls = { version = "0.23.43", default-features = false, features = ["ring", "s
 rustls-native-certs = "0.8.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+semver = "1.0"
 sha2 = "0.10.9"
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
@@ -57,13 +59,14 @@ yuv = "0.8.17"
 
 [build-dependencies]
 cc = "1.2"
+embed-resource = "3.0.11"
 
 [target.'cfg(windows)'.dependencies]
 openuuyc-h264 = { path = "src/decoder/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
 oxideav-h265 = { version = "=0.0.10" }
 egui-directx11 = { path = "vendor/egui-directx11" }
-egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard"] }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Foundation",

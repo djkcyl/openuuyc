@@ -78,7 +78,6 @@ impl DeviceCenterApp {
                             let code = ui.add_sized(
                                 [width, 40.0],
                                 singleline_input(&mut self.assist.direct_code)
-                                    .password(true)
                                     .hint_text("设备验证码（可选）")
                                     .char_limit(256),
                             );
@@ -371,7 +370,6 @@ impl DeviceCenterApp {
                     let input = ui.add_sized(
                         [360.0, 40.0],
                         singleline_input(&mut self.assist.code)
-                            .password(true)
                             .hint_text("输入对端设备验证码")
                             .char_limit(256),
                     );
@@ -446,7 +444,6 @@ impl DeviceCenterApp {
                         .add_sized(
                             [380.0, 36.0],
                             singleline_input(&mut edit.code)
-                                .password(true)
                                 .hint_text("可选，仅保存在本机")
                                 .char_limit(256),
                         )

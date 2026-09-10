@@ -404,11 +404,13 @@ impl ScreenWindows {
             let window = event_loop.create_window(
                 WindowAttributes::default()
                     .with_title(source.window.title())
+                    .with_window_icon(Some(crate::ui::branding::window_icon()))
                     .with_decorations(false)
                     .with_inner_size(source.window.inner_size())
                     .with_min_inner_size(LogicalSize::new(760.0, 520.0))
                     .with_position(PhysicalPosition::new(at.x - 100, at.y - 18)),
             )?;
+            crate::ui::branding::set_taskbar_icon(&window);
             configure_dwm_window(&window);
             let id = window.id();
             self.windows.insert(

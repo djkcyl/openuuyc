@@ -13,7 +13,11 @@ use openuuyc::{
 };
 
 #[derive(Parser)]
-#[command(name = "OpenUUYC", version, about = "OpenUUYC — 跨平台 UU 远程客户端")]
+#[command(
+    name = "OpenUUYC",
+    version,
+    about = "OpenUUYC — 第三方 UU 远程协议兼容客户端"
+)]
 struct Cli {
     /// 日志过滤器，例如 info、debug、trace 或 openuuyc=trace
     #[arg(long, global = true, default_value = logging::DEFAULT_FILTER)]

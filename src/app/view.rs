@@ -1,6 +1,7 @@
 //! Device-center presentation. Network/account ownership remains in app.rs.
 use super::*;
 use egui::{Align, Color32, FontId, RichText, Sense, Stroke, vec2};
+mod about;
 mod assist;
 
 const BG: Color32 = Color32::from_rgb(22, 26, 33);
@@ -28,6 +29,7 @@ enum Page {
     Favorites,
     Management,
     Settings,
+    About,
 }
 impl Page {
     fn title(self) -> &'static str {
@@ -37,6 +39,7 @@ impl Page {
             Self::Favorites => "收藏设备",
             Self::Management => "全部设备",
             Self::Settings => "连接设置",
+            Self::About => "关于",
         }
     }
 }
@@ -47,8 +50,8 @@ pub(super) struct CenterUi {
     search: String,
     online_only: bool,
     details_open: bool,
-    show_virtual: bool,
     edit: Option<DeviceEdit>,
+    legal_document: Option<about::LegalDocument>,
 }
 
 struct DeviceEdit {
@@ -65,9 +68,6 @@ impl CenterUi {
     pub(super) fn open_details(&mut self) {
         self.details_open = true;
     }
-    pub(super) fn show_virtual(&self) -> bool {
-        self.show_virtual
-    }
     pub(super) fn close_details(&mut self) {
         self.details_open = false;
         self.edit = None;
@@ -83,10 +83,10 @@ enum Icon {
     Refresh,
     Close,
     Info,
-    Account,
     Assist,
     Star,
     Edit,
+    Logout,
 }
 
 pub(super) fn configure_visuals(ctx: &egui::Context) {
@@ -220,15 +220,18 @@ fn paint_icon(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Refresh => {
-            let points = (0..=22)
+            let points = (0..=32)
                 .map(|i| {
-                    let angle = 0.3 + i as f32 / 22.0 * 5.1;
-                    c + vec2(angle.cos(), angle.sin()) * 7.0
+                    let angle = std::f32::consts::FRAC_PI_4
+                        + i as f32 / 32.0 * (std::f32::consts::TAU - std::f32::consts::FRAC_PI_4);
+                    q(-2.0, 0.0) + vec2(angle.cos(), angle.sin()) * 8.0
                 })
                 .collect();
             p.add(egui::Shape::line(points, s));
-            p.line_segment([q(6.5, -3.0), q(6.5, 2.5)], s);
-            p.line_segment([q(1.0, 2.5), q(6.5, 2.5)], s);
+            p.add(egui::Shape::line(
+                vec![q(2.0, -4.0), q(6.0, 0.0), q(10.0, -4.0)],
+                s,
+            ));
         }
         Icon::Close => {
             p.line_segment([q(-4.5, -4.5), q(4.5, 4.5)], s);
@@ -239,16 +242,14 @@ fn paint_icon(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
             p.circle_filled(q(0.0, -3.5), 1.0, color);
             p.line_segment([q(0.0, 0.0), q(0.0, 4.0)], s);
         }
-        Icon::Account => {
-            p.circle_stroke(q(0.0, -5.0), 4.0, s);
+        Icon::Logout => {
             p.add(egui::Shape::line(
-                vec![
-                    q(-8.0, 8.0),
-                    q(-6.0, 2.0),
-                    q(0.0, 0.0),
-                    q(6.0, 2.0),
-                    q(8.0, 8.0),
-                ],
+                vec![q(-1.0, -8.0), q(-8.0, -8.0), q(-8.0, 8.0), q(-1.0, 8.0)],
+                s,
+            ));
+            p.line_segment([q(-2.0, 0.0), q(9.0, 0.0)], s);
+            p.add(egui::Shape::line(
+                vec![q(5.0, -4.0), q(9.0, 0.0), q(5.0, 4.0)],
                 s,
             ));
         }
@@ -575,7 +576,11 @@ fn login_qr_area(
     rect
 }
 
-fn login_surface(root: &mut egui::Ui, mut content: impl FnMut(&mut egui::Ui, LoginMethod)) {
+fn login_surface(
+    root: &mut egui::Ui,
+    brand_texture: &egui::TextureHandle,
+    mut content: impl FnMut(&mut egui::Ui, LoginMethod),
+) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(BG).inner_margin(24))
         .show(root, |ui| {
@@ -602,13 +607,7 @@ fn login_surface(root: &mut egui::Ui, mut content: impl FnMut(&mut egui::Ui, Log
                 egui::pos2(card.center().x - brand_width * 0.5, card.top() + 34.0),
                 vec2(36.0, 36.0),
             );
-            painter.rect_filled(brand, 9.0, Color32::from_rgb(37, 70, 114));
-            paint_icon(
-                painter,
-                brand,
-                Icon::Monitor,
-                Color32::from_rgb(139, 185, 255),
-            );
+            crate::ui::branding::paint(painter, brand, brand_texture);
             painter.galley(
                 brand.right_center() + vec2(12.0, -title.size().y * 0.5),
                 title,
@@ -701,7 +700,11 @@ impl DeviceCenterApp {
 
     pub(super) fn draw_center(&mut self, ui: &mut egui::Ui) {
         if self.needs_login() {
-            self.login_page(ui);
+            if self.login_restoring {
+                self.loading_page(ui);
+            } else {
+                self.login_page(ui);
+            }
             return;
         }
         self.draw_navigation(ui);
@@ -714,6 +717,8 @@ impl DeviceCenterApp {
             .show(ui, |ui| {
                 if self.center_ui.page == Page::Settings {
                     self.settings_page(ui);
+                } else if self.center_ui.page == Page::About {
+                    self.about_page(ui);
                 } else if self.center_ui.page == Page::Management {
                     self.management_page(ui);
                 } else if matches!(self.center_ui.page, Page::Assist | Page::Favorites) {
@@ -734,11 +739,39 @@ impl DeviceCenterApp {
                     .inner_margin(egui::Margin::symmetric(12, 20)),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(28.0, 30.0), Sense::hover());
-                    paint_icon(ui.painter(), rect, Icon::Monitor, BLUE);
-                    ui.label(RichText::new(crate::APP_NAME).size(17.0).strong());
+                let (row, response) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                let response = response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("在 GitHub 查看 OpenUUYC");
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "在 GitHub 查看 OpenUUYC",
+                    )
                 });
+                let title_color = if response.hovered() { BLUE } else { TEXT };
+                if response.clicked() {
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab("https://github.com/djkcyl/openuuyc"));
+                }
+                let title = ui.painter().layout_no_wrap(
+                    crate::APP_NAME.into(),
+                    FontId::proportional(17.0),
+                    title_color,
+                );
+                let width = 30.0 + 8.0 + title.size().x;
+                let icon = egui::Rect::from_min_size(
+                    egui::pos2(row.center().x - width * 0.5, row.center().y - 15.0),
+                    vec2(30.0, 30.0),
+                );
+                crate::ui::branding::paint(ui.painter(), icon, &self.brand_texture);
+                ui.painter().galley(
+                    icon.right_center() + vec2(8.0, -title.size().y * 0.5),
+                    title,
+                    title_color,
+                );
                 ui.add_space(28.0);
                 let count = self
                     .devices
@@ -802,42 +835,199 @@ impl DeviceCenterApp {
                 ) {
                     self.center_ui.page = Page::Settings;
                 }
+                if nav_item(
+                    ui,
+                    Icon::Info,
+                    "关于",
+                    None,
+                    self.center_ui.page == Page::About,
+                ) {
+                    self.center_ui.page = Page::About;
+                    self.center_ui.legal_document = None;
+                }
                 ui.with_layout(egui::Layout::bottom_up(Align::Min), |ui| {
-                    ui.label(
-                        RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    let (presence, color) = presence_text(&self.presence);
-                    ui.label(RichText::new(presence).size(12.0).color(color));
-                    ui.add_space(8.0);
-                    if self.logout_pending {
-                        ui.label("正在退出账号…");
-                    } else {
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(vec2(24.0, 26.0), Sense::hover());
-                            paint_icon(ui.painter(), rect, Icon::Account, MUTED);
-                            ui.add_sized(
-                                [82.0, 24.0],
-                                egui::Label::new(if self.account_name.trim().is_empty() {
-                                    "已登录"
-                                } else {
-                                    &self.account_name
-                                })
-                                .truncate(),
-                            )
-                            .on_hover_text(&self.account_name);
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                if ui.add(egui::Button::new("退出").frame(false)).clicked() {
-                                    self.logout();
-                                }
-                            });
-                        });
-                    }
-                    ui.separator();
+                    self.draw_account_footer(ui);
                 });
             });
+    }
+
+    fn draw_account_footer(&mut self, ui: &mut egui::Ui) {
+        let (bounds, _) = ui.allocate_exact_size(vec2(ui.available_width(), 76.0), Sense::hover());
+        let left = bounds.left() + 6.0;
+        let right = bounds.right() - 6.0;
+        ui.painter()
+            .hline(left..=right, bounds.top(), Stroke::new(1.0, LINE));
+
+        let account = if self.logout_pending {
+            "正在退出账号…"
+        } else if self.account_name.trim().is_empty() {
+            "已登录"
+        } else {
+            &self.account_name
+        };
+        let account_row = egui::Rect::from_min_max(
+            egui::pos2(left, bounds.top() + 16.0),
+            egui::pos2(right - 34.0, bounds.top() + 44.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(account_row)
+                .layout(egui::Layout::left_to_right(Align::Center)),
+            |ui| {
+                ui.add(egui::Label::new(RichText::new(account).size(14.0).color(TEXT)).truncate())
+                    .on_hover_text(account);
+            },
+        );
+
+        let exit = egui::Rect::from_center_size(
+            egui::pos2(right - 12.0, account_row.center().y),
+            vec2(28.0, 28.0),
+        );
+        if self.logout_pending {
+            egui::Spinner::new().paint_at(ui, exit.shrink(5.0));
+        } else {
+            let response = ui
+                .interact(exit, ui.id().with("account-logout"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("退出账号");
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "退出账号")
+            });
+            if response.hovered() {
+                ui.painter().rect_filled(exit, 5.0, SURFACE);
+            }
+            paint_icon(
+                ui.painter(),
+                exit,
+                Icon::Logout,
+                if response.hovered() { TEXT } else { MUTED },
+            );
+            if response.clicked() {
+                self.logout();
+            }
+        }
+
+        let (presence, color) = presence_text(&self.presence);
+        let baseline = bounds.top() + 62.0;
+        ui.painter()
+            .circle_filled(egui::pos2(left + 3.0, baseline), 3.0, color);
+        ui.painter().text(
+            egui::pos2(left + 13.0, baseline),
+            egui::Align2::LEFT_CENTER,
+            presence,
+            FontId::proportional(11.0),
+            MUTED,
+        );
+        self.draw_version(
+            ui,
+            egui::Rect::from_center_size(egui::pos2(right - 32.0, baseline), vec2(64.0, 22.0)),
+        );
+    }
+
+    fn draw_version(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        use super::updates::State;
+        let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let (label, color, mut hint, destination) = match &self.updates.state {
+            State::Checking => (
+                "检查中…".into(),
+                MUTED,
+                format!("当前版本 {current}，正在检查更新…"),
+                None,
+            ),
+            State::Current => (
+                current.clone(),
+                MUTED,
+                "已是最新正式版，点击重新检查".into(),
+                None,
+            ),
+            State::Ahead => (
+                current.clone(),
+                MUTED,
+                "当前版本高于 GitHub 最新正式版，点击重新检查".into(),
+                None,
+            ),
+            State::NoRelease => (
+                current.clone(),
+                MUTED,
+                "暂无公开正式版本，点击重新检查".into(),
+                None,
+            ),
+            State::Failed(error) => (
+                format!("{current} !"),
+                AMBER,
+                format!("检查更新失败：{error}\n点击重试"),
+                None,
+            ),
+            State::Available { version, url } => {
+                let label = format!("↑ v{version}");
+                (
+                    if label.chars().count() <= 10 {
+                        label
+                    } else {
+                        "有新版本".into()
+                    },
+                    BLUE,
+                    format!("发现新版本 v{version}（当前 {current}）\n点击打开 GitHub 发布页"),
+                    Some(url.clone()),
+                )
+            }
+        };
+        let checking = matches!(self.updates.state, State::Checking);
+        let wait = self.updates.retry_wait();
+        let enabled = !checking && (destination.is_some() || wait == 0);
+        if !checking && destination.is_none() && wait > 0 {
+            hint.push_str(&format!("\n{wait} 秒后可重新检查"));
+        }
+        let text_size = ui
+            .painter()
+            .layout_no_wrap(label.clone(), FontId::proportional(11.0), color)
+            .size();
+        let hit_rect = egui::Rect::from_min_size(
+            rect.right_center() - vec2(text_size.x, text_size.y * 0.5),
+            text_size,
+        )
+        .expand(2.0)
+        .intersect(rect)
+        .intersect(ui.clip_rect());
+        let response = ui
+            .interact(
+                hit_rect,
+                ui.id().with("check-release"),
+                if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
+            )
+            .on_hover_text(hint);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "检查更新")
+        });
+        let response = if enabled {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            response
+        };
+        ui.painter()
+            .with_clip_rect(rect.intersect(ui.clip_rect()))
+            .text(
+                rect.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                label,
+                FontId::proportional(11.0),
+                if enabled && response.hovered() {
+                    BLUE
+                } else {
+                    color
+                },
+            );
+        if response.clicked() {
+            if let Some(url) = destination {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            } else {
+                self.updates.request(ui.ctx());
+            }
+        }
     }
 
     fn alert(&mut self, ui: &mut egui::Ui) {
@@ -941,7 +1131,6 @@ impl DeviceCenterApp {
             }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.checkbox(&mut self.center_ui.online_only, "仅在线");
-                ui.checkbox(&mut self.center_ui.show_virtual, "显示虚拟设备");
             });
         });
         ui.add_space(18.0);
@@ -1025,15 +1214,6 @@ impl DeviceCenterApp {
                     );
                 }
                 for (group, device) in rows {
-                    let note = if self
-                        .catalog
-                        .as_ref()
-                        .is_some_and(|c| c.is_virtual(&device.device_id))
-                    {
-                        "虚拟设备"
-                    } else {
-                        group
-                    };
                     let own = self.active_session.as_ref().is_some_and(|session| {
                         session.device_id.as_deref() == Some(device.device_id.as_str())
                     });
@@ -1048,7 +1228,7 @@ impl DeviceCenterApp {
                         .push_id(&device.device_id, |ui| {
                             device_row(
                                 ui,
-                                note,
+                                group,
                                 device,
                                 self.selected_device_id.as_deref() == Some(&device.device_id),
                                 own,
@@ -1651,6 +1831,37 @@ impl DeviceCenterApp {
         }
     }
 
+    fn loading_page(&self, root: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG))
+            .show(root, |ui| {
+                let center = ui.available_rect_before_wrap().center();
+                crate::ui::branding::paint(
+                    ui.painter(),
+                    egui::Rect::from_center_size(center - vec2(0.0, 42.0), vec2(112.0, 112.0)),
+                    &self.brand_texture,
+                );
+                ui.painter().text(
+                    center + vec2(0.0, 40.0),
+                    egui::Align2::CENTER_CENTER,
+                    crate::APP_NAME,
+                    FontId::proportional(24.0),
+                    TEXT,
+                );
+                egui::Spinner::new().color(MUTED).paint_at(
+                    ui,
+                    egui::Rect::from_center_size(center + vec2(0.0, 83.0), vec2(18.0, 18.0)),
+                );
+                ui.painter().text(
+                    center + vec2(0.0, 117.0),
+                    egui::Align2::CENTER_CENTER,
+                    "正在加载…",
+                    FontId::proportional(13.0),
+                    MUTED,
+                );
+            });
+    }
+
     fn login_page(&mut self, root: &mut egui::Ui) {
         let locked = self.login_restoring
             || self.logout_pending
@@ -1663,7 +1874,7 @@ impl DeviceCenterApp {
         }
         let mut qr_action = QrAction::None;
         let mut phone_action = PhoneAction::default();
-        login_surface(root, |ui, method| match method {
+        login_surface(root, &self.brand_texture, |ui, method| match method {
             LoginMethod::Qr => {
                 qr_action = qr_form(
                     ui,
