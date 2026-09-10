@@ -1,0 +1,46 @@
+//! OpenUUYC: native UU Remote interoperability building blocks.
+
+pub const APP_NAME: &str = "OpenUUYC";
+pub(crate) const VIEWER_TITLE_PREFIX: &str = "OpenUUYC — ";
+
+mod adaptive_bitrate;
+pub mod api;
+pub mod app;
+pub mod assist;
+mod audio;
+pub mod auth;
+mod capability;
+pub mod client;
+mod codec_parameters;
+mod control;
+pub mod controller;
+mod decoder;
+mod decoder_pool;
+mod decoder_result;
+mod device_session;
+mod flexfec;
+pub mod logging;
+pub mod login;
+pub mod media;
+mod network_control;
+mod nrd_http;
+pub mod official_receiver;
+pub mod performance;
+mod presence;
+mod rsfec;
+pub mod rtc;
+mod rtcp_timing;
+pub mod rtp_capture;
+mod session_restore;
+pub mod signal;
+pub mod stream_control;
+mod timing;
+mod ulpfec;
+mod uu_kcp;
+mod video_color;
+mod video_format;
+pub mod viewer;
+mod viewer_owner;
+mod viewing_settings;
+mod virtual_hardware;
+mod xor_fec;

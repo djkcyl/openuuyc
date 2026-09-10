@@ -1,0 +1,24 @@
+[package]
+name = "openuuyc-h264"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "LGPL-2.1-or-later"
+description = "OpenUUYC platform-independent H.264 software core"
+
+[dependencies]
+# Parameter-set and slice-header syntax only. Pixel/entropy processing below
+# this boundary uses this crate's own FFmpeg-derived streaming implementation.
+oxideav-h264 = "=0.1.8"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]
+
+[features]
+# Whole-pipeline diagnostics, absent from production/timing builds.
+profile = []
+# Offline whole-decoder attribution only; never enabled by the application.
+scalar-dsp = []
+portable-cabac = []

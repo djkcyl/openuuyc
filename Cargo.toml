@@ -1,0 +1,143 @@
+[package]
+name = "openuuyc"
+version = "0.1.0"
+edition = "2024"
+description = "OpenUUYC - cross-platform native UU Remote client"
+license-file = "LICENSE"
+publish = false
+default-run = "OpenUUYC"
+autobins = false
+
+[[bin]]
+name = "OpenUUYC"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+bytemuck = { version = "1.25.2", features = ["derive", "extern_crate_alloc"] }
+base64 = "0.22.1"
+bytes = "1.11.1"
+crossbeam-queue = "0.3.12"
+cpal = "0.18.2"
+clap = { version = "4.6.6", features = ["derive"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+display-info = "0.5.9"
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = { version = "0.36.1", default-features = false, features = ["bytemuck"] }
+flate2 = "1.1"
+futures-util = "0.3.34"
+hmac = "0.12.1"
+hyper = { version = "1.10.1", default-features = false }
+keyring = "4.1.6"
+kcp = { path = "vendor/kcp" }
+mediaway-common = "=0.1.8"
+opusic-c = "1.6.1"
+qrcode = { version = "0.14.1", default-features = false }
+rand = "0.9"
+prost = "0.14"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "system-proxy", "gzip"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+thiserror = "2.0"
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+url = "2.5.8"
+uuid = { version = "1.25.0", features = ["v4"] }
+webrtc = { path = "vendor/webrtc" }
+webrtc-srtp = "0.17.2"
+yuv = "0.8.17"
+
+[build-dependencies]
+cc = "1.2"
+
+[target.'cfg(windows)'.dependencies]
+openuuyc-h264 = { path = "src/decoder/h264-core" }
+oxideav-h264 = { version = "=0.1.8" }
+oxideav-h265 = { version = "=0.0.10" }
+egui-directx11 = { path = "vendor/egui-directx11" }
+egui-winit = { version = "0.36.1", default-features = false }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpu-video = { version = "0.4.0", default-features = false }
+cros-libva = "0.0.13"
+smallvec = { version = "1.15", default-features = false, features = ["const_generics"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+iso-bmff = "0.1.1"
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "CFString", "CFDictionary", "CFNumber", "CFPropertyList",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "CMBase", "CMFormatDescription", "CMSampleBuffer",
+    "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "CMBlockBuffer",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn",
+] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = [
+    "VTDecompressionSession", "VTDecompressionProperties", "VTErrors", "VTSession",
+    "objc2-core-media", "objc2-core-video",
+] }
+
+[patch.crates-io]
+dtls = { path = "vendor/dtls" }
+interceptor = { path = "vendor/interceptor" }
+rtcp = { path = "vendor/rtcp" }
+turn = { path = "vendor/turn" }
+webrtc-ice = { path = "vendor/webrtc-ice" }
+webrtc-sctp = { path = "vendor/webrtc-sctp" }
+webrtc-srtp = { path = "vendor/webrtc-srtp" }
+webrtc-util = { path = "vendor/webrtc-util" }
+
+[profile.dev.package.gpu-video]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.h264-reader]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.yuv]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.oxideav-h264]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.oxideav-h265]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.openuuyc-h264]
+opt-level = 3

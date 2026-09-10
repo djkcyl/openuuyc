@@ -1,0 +1,29 @@
+OpenUUYC - All Rights Reserved
+
+Copyright (c) 2026 djkcyl and the respective original contributors.
+
+Except for the separately licensed material identified below, all rights in
+original OpenUUYC material are reserved by the respective copyright holders.
+Access to or display of source code does not grant a license to use, execute,
+copy, modify, create derivative works, distribute, sublicense, sell, or
+otherwise commercially exploit that material. These activities require prior
+written permission from the applicable copyright holder, except to the extent
+permitted by mandatory applicable law or separately granted rights.
+
+Third-party and separately licensed material
+--------------------------------------------
+This notice does not relicense third-party material or portions already
+subject to another license. Such material, including FFmpeg-derived code
+under LGPL-2.1-or-later, remains governed by its own license and copyright
+notices. See THIRD_PARTY_NOTICES and the notices accompanying those files.
+No restriction in this notice overrides rights or obligations under those
+licenses, including rights required for modification or debugging of an
+LGPL-covered component. Valid rights previously granted under other licenses
+are not revoked by this notice.
+
+Disclaimer
+----------
+To the extent permitted by law, the material is provided AS IS, without any
+warranty, including warranties of merchantability, fitness for a particular
+purpose, or noninfringement. The copyright holders are not liable for claims
+or damages arising from access to or use of the material.

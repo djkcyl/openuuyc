@@ -1,0 +1,38 @@
+OpenUUYC includes third-party and derived source code. The root all-rights-reserved
+notice does not replace or restrict the licenses or copyright notices of
+these components. Existing third-party and separately licensed rights remain
+in effect, including rights in LGPL-covered modifications.
+
+Video decoding
+--------------
+FFmpeg-derived Rust software decoding and DXVA parameter-writing code retain
+LGPL-2.1-or-later and their original author notices, including Michael
+Niedermayer, Loren Merritt, Daniel Kang, Laurent Aimar and Hendrik Leppkes.
+See src/decoder/COPYING.FFmpeg, src/decoder/h264-core/COPYING.LGPLv2.1 and the
+individual source headers. Software reference: FFmpeg 8.0.3,
+https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz.
+
+Platform adaptation derived from mediaway-decoder 0.1.8 retains copyright
+2026 NyxWays and MIT OR Apache-2.0 licensing. See src/decoder/LICENSE-MIT
+and src/decoder/LICENSE-APACHE. The old decoder crate is not a dependency.
+
+Audio
+-----
+vendor/webrtc_neteq contains a WebRTC NetEq subset from branch-heads/5481,
+with Abseil 20230125.3 and Opus public headers from opusic-sys 0.7.5.
+Source: https://webrtc.googlesource.com/src/+/refs/branch-heads/5481/
+Preserved notices: LICENSE, PATENTS, AUTHORS, absl/LICENSE and
+third_party/opus/src/COPYING within vendor/webrtc_neteq.
+src/audio/neteq_bridge.cc is the application adapter. The build disables
+WebRTC logging/tracing and post-decode VAD; original source notices remain.
+vendor/speexdsp retains its license in COPYING. Opus is built through the
+opusic-c/opusic-sys dependency, with its upstream license.
+
+Transport and rendering
+-----------------------
+The vendored WebRTC-rs crates, KCP and egui-directx11 retain their individual
+LICENSE, LICENSE-MIT and/or LICENSE-APACHE files and source headers. Some are
+modified for the application's protocol, lifecycle and presentation behavior.
+
+Cargo.lock records dependency versions. Registry dependencies and platform
+bindings remain subject to their own package licenses and notices.
