@@ -1,3 +1,4 @@
+use crate::ui::d3d11::{create_backbuffer, nonzero_size, window_hwnd};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -291,7 +292,7 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
             screens.repaint(event);
             return;
         }
-        // Match egui/eframe's callback contract: requests from the just
+        // Match egui's callback contract: requests from the just
         // completed pass are valid; older requests have already been serviced.
         // A replaced room has a new Context and must reject the old callbacks.
         let context = self
@@ -1116,17 +1117,6 @@ fn window_buttons(ui: &mut egui::Ui, window: &Window) -> bool {
 
 pub(super) fn title_bar_height_pixels(window: &Window) -> u32 {
     (42.0 * window.scale_factor()).round().max(1.0) as u32
-}
-
-pub(super) fn window_hwnd(window: &Window) -> Result<HWND> {
-    let RawWindowHandle::Win32(handle) = window
-        .window_handle()
-        .context("get Windows video window handle")?
-        .as_raw()
-    else {
-        bail!("video window did not expose a Win32 handle");
-    };
-    Ok(HWND(handle.hwnd.get() as *mut std::ffi::c_void))
 }
 
 fn configure_dwm_window(window: &Window) {
@@ -3118,25 +3108,6 @@ fn is_device_lost(error: &anyhow::Error) -> bool {
                     | DXGI_ERROR_DRIVER_INTERNAL_ERROR
             )
         })
-}
-
-pub(super) fn create_backbuffer(
-    device: &ID3D11Device,
-    swap_chain: &IDXGISwapChain1,
-) -> Result<(ID3D11Texture2D, ID3D11RenderTargetView)> {
-    let backbuffer = unsafe { swap_chain.GetBuffer::<ID3D11Texture2D>(0) }
-        .context("get D3D11 swap-chain backbuffer")?;
-    let mut target = None;
-    unsafe { device.CreateRenderTargetView(&backbuffer, None, Some(&raw mut target)) }
-        .context("create D3D11 swap-chain render target")?;
-    Ok((
-        backbuffer,
-        target.context("D3D11 did not return a render target")?,
-    ))
-}
-
-pub(super) fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
-    PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
 fn swap_chain_output_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {

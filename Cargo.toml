@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
-bytemuck = { version = "1.25.2", features = ["derive", "extern_crate_alloc"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 base64 = "0.22.1"
 bytes = "1.11.1"
 crossbeam-queue = "0.3.12"
@@ -23,8 +23,7 @@ cpal = "0.18.2"
 clap = { version = "4.6.6", features = ["derive"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 display-info = "0.5.9"
-eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
-egui = { version = "0.36.1", default-features = false, features = ["bytemuck"] }
+egui = { version = "0.36.1", default-features = false, features = ["bytemuck", "default_fonts"] }
 flate2 = "1.1"
 futures-util = "0.3.34"
 hmac = "0.12.1"
@@ -64,7 +63,7 @@ openuuyc-h264 = { path = "src/decoder/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
 oxideav-h265 = { version = "=0.0.10" }
 egui-directx11 = { path = "vendor/egui-directx11" }
-egui-winit = { version = "0.36.1", default-features = false }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Foundation",
@@ -113,6 +112,20 @@ webrtc-ice = { path = "vendor/webrtc-ice" }
 webrtc-sctp = { path = "vendor/webrtc-sctp" }
 webrtc-srtp = { path = "vendor/webrtc-srtp" }
 webrtc-util = { path = "vendor/webrtc-util" }
+
+[profile.release]
+# Keep playback dependencies, including decoder and SIMD kernels, at their original
+# speed settings. Cross-crate LTO changed hot-code layout in decoder comparisons.
+opt-level = 3
+lto = false
+codegen-units = 16
+strip = "debuginfo"
+# Decoder workers rely on unwinding to contain failures and release resources.
+panic = "unwind"
+
+[profile.release.package.openuuyc]
+# Optimize application glue for size without changing decoder/DSP dependencies.
+opt-level = "s"
 
 [profile.dev.package.gpu-video]
 opt-level = 3

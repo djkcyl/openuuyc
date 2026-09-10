@@ -6,10 +6,9 @@ use mediaway_common::{GpuDeviceHandle, NativeHandle};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
 use windows::Win32::Graphics::Dxgi::{
@@ -36,7 +35,6 @@ pub(crate) struct D3D11Surface {
 struct D3D11Shared {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    staging: Mutex<Option<(D3D11_TEXTURE2D_DESC, ID3D11Texture2D)>>,
     reported_format: Mutex<Option<windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT>>,
 }
 
@@ -50,20 +48,9 @@ pub(crate) fn acquire_texture_sync(sync: &IDXGIKeyedMutex, timeout_ms: u32) -> R
     Ok(())
 }
 
-struct TextureReadGuard(Option<IDXGIKeyedMutex>);
-impl Drop for TextureReadGuard {
-    fn drop(&mut self) {
-        if let Some(sync) = &self.0
-            && let Err(error) = unsafe { sync.ReleaseSync(0) }
-        {
-            tracing::warn!(%error, "release readback texture sync failed");
-        }
-    }
-}
-
 // The device is created with D3D11 multithread protection enabled. All immediate-context
-// calls are serialized by the driver, while mutable readback-pool state is protected by a
-// Mutex. The raw COM wrappers are reference-counted and remain alive through this Arc.
+// calls are serialized by the driver; format-reporting metadata uses a Mutex.
+// The raw COM wrappers are reference-counted and remain alive through this Arc.
 unsafe impl Send for D3D11Shared {}
 unsafe impl Sync for D3D11Shared {}
 
@@ -182,7 +169,6 @@ impl D3D11SurfaceWriter {
             shared: Arc::new(D3D11Shared {
                 device,
                 context,
-                staging: Mutex::new(None),
                 reported_format: Mutex::new(None),
             }),
         })
@@ -348,146 +334,4 @@ impl D3D11Surface {
     pub(crate) fn format(&self) -> windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT {
         self.desc.Format
     }
-
-    pub(crate) fn readback_nv12(&self, width: u32, height: u32) -> Result<Vec<u8>> {
-        if self.desc.Format != DXGI_FORMAT_NV12 {
-            bail!(
-                "CPU readback only supports NV12, got {:?}",
-                self.desc.Format
-            );
-        }
-        let sync = if self.shared_handle.is_some() {
-            let sync = self
-                .texture
-                .cast::<IDXGIKeyedMutex>()
-                .context("query readback texture sync")?;
-            acquire_texture_sync(&sync, 100)?;
-            Some(sync)
-        } else {
-            None
-        };
-        let _sync = TextureReadGuard(sync);
-        let mut staging = self
-            .shared
-            .staging
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let matches = staging.as_ref().is_some_and(|(desc, _)| {
-            desc.Width == self.desc.Width
-                && desc.Height == self.desc.Height
-                && desc.Format == self.desc.Format
-        });
-        if !matches {
-            let staging_desc = D3D11_TEXTURE2D_DESC {
-                Width: self.desc.Width,
-                Height: self.desc.Height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: self.desc.Format,
-                SampleDesc: self.desc.SampleDesc,
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            *staging = Some((
-                staging_desc,
-                create_texture(&self.shared.device, &staging_desc)?,
-            ));
-        }
-        let staging_texture = staging
-            .as_ref()
-            .expect("staging texture was initialized")
-            .1
-            .clone();
-        unsafe {
-            self.shared.context.CopySubresourceRegion(
-                &staging_texture,
-                0,
-                0,
-                0,
-                0,
-                self.texture(),
-                self.subresource(),
-                None,
-            );
-        }
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe {
-            self.shared.context.Map(
-                &staging_texture,
-                0,
-                D3D11_MAP_READ,
-                0,
-                Some(&raw mut mapped),
-            )
-        }
-        .context("map owned D3D11 NV12 surface")?;
-        let result = copy_mapped_nv12(
-            &mapped,
-            self.desc.Height,
-            self.frame.visible_x(),
-            self.frame.visible_y(),
-            width,
-            height,
-        );
-        unsafe { self.shared.context.Unmap(&staging_texture, 0) };
-        result
-    }
-}
-
-fn create_texture(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Result<ID3D11Texture2D> {
-    let mut texture = None;
-    unsafe { device.CreateTexture2D(desc, None, Some(&raw mut texture)) }
-        .context("create D3D11 video surface")?;
-    texture.context("D3D11 did not return a video surface")
-}
-
-fn copy_mapped_nv12(
-    mapped: &D3D11_MAPPED_SUBRESOURCE,
-    coded_height: u32,
-    visible_x: u32,
-    visible_y: u32,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>> {
-    if mapped.pData.is_null() || mapped.RowPitch < width {
-        bail!("mapped D3D11 NV12 texture has an invalid pointer or row pitch");
-    }
-    let width = usize::try_from(width).context("NV12 width does not fit usize")?;
-    let height = usize::try_from(height).context("NV12 height does not fit usize")?;
-    let coded_height =
-        usize::try_from(coded_height).context("NV12 coded height does not fit usize")?;
-    let visible_x = usize::try_from(visible_x).context("NV12 crop x does not fit usize")?;
-    let visible_y = usize::try_from(visible_y).context("NV12 crop y does not fit usize")?;
-    let row_pitch = usize::try_from(mapped.RowPitch).context("NV12 pitch does not fit usize")?;
-    if visible_x.saturating_add(width) > row_pitch
-        || visible_y.saturating_add(height) > coded_height
-    {
-        bail!("NV12 visible aperture exceeds the mapped coded surface");
-    }
-    let luma_len = width
-        .checked_mul(height)
-        .context("NV12 luma size overflow")?;
-    let mut output = vec![0u8; luma_len + luma_len / 2];
-    let source = mapped.pData.cast::<u8>();
-    unsafe {
-        for row in 0..height {
-            std::ptr::copy_nonoverlapping(
-                source.add((visible_y + row) * row_pitch + visible_x),
-                output.as_mut_ptr().add(row * width),
-                width,
-            );
-        }
-        let source_uv = source.add((coded_height + visible_y / 2) * row_pitch + visible_x);
-        let output_uv = output.as_mut_ptr().add(luma_len);
-        for row in 0..height / 2 {
-            std::ptr::copy_nonoverlapping(
-                source_uv.add(row * row_pitch),
-                output_uv.add(row * width),
-                width,
-            );
-        }
-    }
-    Ok(output)
 }

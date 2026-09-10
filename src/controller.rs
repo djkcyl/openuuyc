@@ -224,6 +224,7 @@ async fn run_viewer_window(
     target_id: Option<String>,
     assist: Option<crate::assist::AssistRequest>,
 ) -> Result<()> {
+    crate::ui::ensure_supported()?;
     let owns_presence = owner.is_none();
     let owner = match owner {
         Some(descriptor) => Some(crate::viewer_owner::connect(&descriptor).await?),
@@ -936,6 +937,7 @@ pub async fn run_native_viewer_session(
     connection: ControllerConnection,
     viewer: NativeViewerSession,
 ) -> Result<()> {
+    crate::ui::ensure_supported()?;
     let close_handle = viewer.close_handle();
     let close_on_session_end = close_handle.clone();
     let close_on_interrupt = close_handle;

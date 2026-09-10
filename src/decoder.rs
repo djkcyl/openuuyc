@@ -94,24 +94,6 @@ impl DecodedSurface {
     }
 }
 
-impl RenderSurface {
-    pub(crate) fn into_cpu_rgba8(
-        self,
-        _width: u32,
-        _height: u32,
-        _color: RenderColor,
-    ) -> Result<Vec<Rgba8>> {
-        match self {
-            Self::CpuRgba8(pixels) => Ok(pixels),
-            #[cfg(windows)]
-            Self::D3D11(surface) => {
-                let nv12 = surface.readback_nv12(_width, _height)?;
-                nv12_to_rgba_pixels(_width, _height, &nv12, _color)
-            }
-        }
-    }
-}
-
 pub(crate) struct NativeVideoDecoder {
     backend: DecoderBackend,
     candidate: DecoderCandidate,
@@ -389,17 +371,6 @@ impl NativeVideoDecoder {
             #[cfg(target_os = "linux")]
             DecoderBackend::VulkanH264(_) => {}
         }
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn outputs_native_surface(&self) -> bool {
-        matches!(
-            self.backend,
-            DecoderBackend::Platform {
-                frame_reader: FrameReader::Windows(_),
-                ..
-            }
-        )
     }
 
     pub(crate) fn reset_for_keyframe(&mut self, hard_reset: bool) -> Result<()> {

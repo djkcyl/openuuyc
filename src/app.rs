@@ -7,7 +7,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use eframe::egui;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -41,6 +40,7 @@ pub struct GuiOptions {
 }
 
 pub fn run(options: GuiOptions) -> Result<()> {
+    crate::ui::ensure_supported()?;
     let (local_display, display_warning) = match detect_local_display() {
         Ok(display) => (display, None),
         Err(error) => (
@@ -60,18 +60,15 @@ pub fn run(options: GuiOptions) -> Result<()> {
         .with_title(format!("{} · 控制中心", crate::APP_NAME))
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([900.0, 620.0]);
-    let native_options = eframe::NativeOptions {
-        viewport,
-        centered: true,
-        ..Default::default()
-    };
-    eframe::run_native(
-        crate::APP_NAME,
-        native_options,
-        Box::new(move |creation| {
-            crate::viewer::install_system_cjk_font(&creation.egui_ctx);
-            configure_visuals(&creation.egui_ctx);
-            creation.egui_ctx.request_repaint();
+    crate::ui::run(
+        crate::ui::WindowConfig {
+            viewport,
+            centered: true,
+        },
+        Box::new(move |ctx, graphics| {
+            crate::viewer::install_system_cjk_font(ctx);
+            configure_visuals(ctx);
+            ctx.request_repaint();
             let mut app = DeviceCenterApp::new(
                 refresh_interval,
                 local_display,
@@ -80,16 +77,12 @@ pub fn run(options: GuiOptions) -> Result<()> {
                 options.log_file,
                 display_warning,
             );
-            if let Some(state) = &creation.wgpu_render_state {
-                let info = state.adapter.get_info();
-                app.diagnostics
-                    .graphics
-                    .push(format!("{} · {:?}", info.name, info.backend));
+            if let Some(graphics) = graphics {
+                app.diagnostics.graphics.push(graphics);
             }
-            Ok(Box::new(app))
+            Box::new(app)
         }),
     )
-    .map_err(|error| anyhow!("run graphical device center: {error}"))
 }
 
 struct DeviceCenterApp {
@@ -871,8 +864,8 @@ impl DeviceCenterApp {
     }
 }
 
-impl eframe::App for DeviceCenterApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl crate::ui::App for DeviceCenterApp {
+    fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.drain_events(&ctx);
         self.draw_center(ui);

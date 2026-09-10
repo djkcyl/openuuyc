@@ -2,6 +2,7 @@ fn main() {
     build_neteq();
     println!("cargo:rerun-if-changed=vendor/speexdsp");
     cc::Build::new()
+        .opt_level(3)
         .file("vendor/speexdsp/libspeexdsp/resample.c")
         .include("vendor/speexdsp/include")
         .define("FLOATING_POINT", "1")
@@ -20,6 +21,7 @@ fn build_neteq() {
     let mut c = cc::Build::new();
     for build in [&mut cpp, &mut c] {
         build
+            .opt_level(3)
             .include(root)
             .define("NDEBUG", None)
             .define("RTC_DISABLE_LOGGING", None)

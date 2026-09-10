@@ -8,8 +8,8 @@ mod params;
 
 use super::*;
 use std::ffi::c_void;
-use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+use windows::core::Interface;
 
 enum Decoder {
     Avc(avc::Avc),

@@ -35,6 +35,7 @@ mod session_restore;
 pub mod signal;
 pub mod stream_control;
 mod timing;
+mod ui;
 mod ulpfec;
 mod uu_kcp;
 mod video_color;

@@ -7,16 +7,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
-use eframe::egui;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::decoder::{
-    DecodedBatch, DecodedFrame, DecoderOutputIssue, NativeVideoDecoder, RenderSurface, Rgba8,
+    DecodedBatch, DecodedFrame, DecoderOutputIssue, NativeVideoDecoder, RenderSurface,
 };
 use crate::decoder_pool::DecoderPool;
 use crate::decoder_result::VideoDecodeResult;
 use crate::media::VideoCodec;
-use crate::performance::{PerformanceMonitor, PerformanceSnapshot, RenderedFrameTiming};
+use crate::performance::{PerformanceMonitor, PerformanceSnapshot};
 use crate::rtc::{EncodedVideoFrame, FrameSenderTiming, VideoFrameSink, VideoReceiverFeedback};
 use crate::stream_control::StreamControlHandle;
 use crate::video_color::RenderColor;
@@ -32,21 +31,6 @@ mod windows_presenter;
 mod windows_ui;
 
 const CONNECTION_PROGRESS_STEPS: u8 = 13;
-
-fn direct_viewer_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
-    eframe::NativeOptions {
-        viewport,
-        centered: true,
-        wgpu_options: eframe::WgpuConfiguration {
-            surface: eframe::SurfaceConfig {
-                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
-                desired_maximum_frame_latency: Some(1),
-            },
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
 
 #[derive(Clone, Debug)]
 pub enum ConnectionProgressState {
@@ -133,29 +117,8 @@ pub(crate) fn run_connecting_viewer_window(
     }
     #[cfg(not(windows))]
     {
-        let _ = display_sender.send(ViewerDisplayHandle::default());
-        let viewport = egui::ViewportBuilder::default()
-            .with_title(format!("{}{alias}", crate::VIEWER_TITLE_PREFIX))
-            .with_inner_size([1280.0, 760.0])
-            .with_min_inner_size([760.0, 520.0]);
-        let options = direct_viewer_options(viewport);
-        eframe::run_native(
-            crate::APP_NAME,
-            options,
-            Box::new(move |creation| {
-                install_system_cjk_font(&creation.egui_ctx);
-                configure_viewer_visuals(&creation.egui_ctx);
-                Ok(Box::new(ConnectingViewerApp {
-                    connection: Some(ConnectionProgressApp::new(alias.clone(), progress)),
-                    alias,
-                    sessions: session,
-                    player: None,
-                    close_requested: false,
-                    preferences: ViewerPreferences::default(),
-                }))
-            }),
-        )
-        .map_err(|error| anyhow!("run connection/player window: {error}"))
+        let _ = (alias, progress, session, display_sender);
+        crate::ui::ensure_supported()
     }
 }
 
@@ -397,61 +360,6 @@ impl ConnectionProgressApp {
     }
 }
 
-#[cfg(not(windows))]
-struct ConnectingViewerApp {
-    close_requested: bool,
-    alias: String,
-    connection: Option<ConnectionProgressApp>,
-    sessions: std_mpsc::Receiver<ViewerWindowEvent>,
-    player: Option<ViewerApp>,
-    preferences: ViewerPreferences,
-}
-
-#[cfg(not(windows))]
-impl eframe::App for ConnectingViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        while let Ok(event) = self.sessions.try_recv() {
-            if self.close_requested {
-                continue;
-            }
-            match event {
-                ViewerWindowEvent::Close => self.close_requested = true,
-                ViewerWindowEvent::Playing(session) => {
-                    let session = *session;
-                    session.frame_wake.install_context(ui.ctx().clone());
-                    self.player = Some(ViewerApp::from_session(session, self.preferences));
-                    self.connection = None;
-                }
-                ViewerWindowEvent::Reconnect { progress, display } => {
-                    if let Some(player) = self.player.as_ref() {
-                        self.preferences.performance_mode = player.performance_mode;
-                    }
-                    self.player.take();
-                    self.connection =
-                        Some(ConnectionProgressApp::new(self.alias.clone(), progress));
-                    let _ = display.send(ViewerDisplayHandle::default());
-                }
-            }
-        }
-        if self.close_requested {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-        if let Some(player) = self.player.as_mut() {
-            player.ui(ui, frame);
-        } else if let Some(connection) = self.connection.as_mut() {
-            connection.draw(ui);
-        }
-        ui.ctx().request_repaint_after(Duration::from_millis(16));
-    }
-
-    fn on_exit(&mut self) {
-        if let Some(player) = self.player.as_mut() {
-            player.shutdown.store(true, Ordering::Release);
-        }
-    }
-}
-
 #[derive(Debug)]
 struct DecodedVideoFrame {
     is_new_picture: Option<bool>,
@@ -478,11 +386,6 @@ struct FrameTiming {
     rotation: u16,
     keyframe: bool,
     sender_timing: FrameSenderTiming,
-}
-
-struct DecoderStartup {
-    #[cfg(windows)]
-    use_windows_presenter: bool,
 }
 
 struct DecodedForwardContext<'a> {
@@ -662,7 +565,6 @@ struct FrameWake {
     visible: Arc<AtomicBool>,
     #[cfg(windows)]
     render_thread: Arc<Mutex<Option<std::thread::Thread>>>,
-    context: Arc<Mutex<Option<egui::Context>>>,
 }
 
 impl FrameWake {
@@ -672,18 +574,10 @@ impl FrameWake {
         self.visible.store(true, Ordering::Release);
     }
 
-    fn install_context(&self, context: egui::Context) {
-        *mutex_lock(&self.context) = Some(context);
-        self.visible.store(true, Ordering::Release);
-    }
-
     fn notify(&self) {
         #[cfg(windows)]
         if let Some(thread) = mutex_lock(&self.render_thread).as_ref() {
             thread.unpark();
-        }
-        if let Some(context) = mutex_lock(&self.context).as_ref() {
-            context.request_repaint();
         }
     }
 }
@@ -707,9 +601,7 @@ pub struct NativeViewerSession {
     video_sink: Option<mpsc::UnboundedSender<EncodedVideoFrame>>,
     frame_queue: FrameQueue,
     frame_wake: FrameWake,
-    #[cfg(windows)]
-    use_windows_presenter: bool,
-    startup_receiver: Option<oneshot::Receiver<Result<DecoderStartup, String>>>,
+    startup_receiver: Option<oneshot::Receiver<Result<(), String>>>,
     performance: PerformanceMonitor,
     stream_control: StreamControlHandle,
     shutdown: Arc<AtomicBool>,
@@ -816,8 +708,6 @@ impl NativeViewerSession {
             video_sink: Some(video_sink),
             frame_queue,
             frame_wake,
-            #[cfg(windows)]
-            use_windows_presenter: false,
             performance,
             stream_control,
             shutdown,
@@ -835,22 +725,14 @@ impl NativeViewerSession {
         Ok(session)
     }
 
-    /// Wait until the decoder opened against the first frame's parameter sets
-    /// (and its native surface capability is known), then feed the saved
-    /// startup outcome to the window presenter selection.
+    /// Wait until the decoder opened against the first frame's parameter sets.
     pub(crate) async fn startup(&mut self) -> Result<()> {
-        let startup = self
-            .startup_receiver
+        self.startup_receiver
             .take()
             .context("decoder startup already awaited")?
             .await
             .map_err(|error| anyhow!("native decoder startup ended: {error}"))?
-            .map_err(|error| anyhow!("start native platform decoder: {error}"))?;
-        #[cfg(windows)]
-        {
-            self.use_windows_presenter = startup.use_windows_presenter;
-        }
-        Ok(())
+            .map_err(|error| anyhow!("start native platform decoder: {error}"))
     }
 
     pub(crate) fn is_software(&self) -> bool {
@@ -950,46 +832,13 @@ impl NativeViewerSession {
 
     pub fn run(self) -> Result<()> {
         #[cfg(windows)]
-        if self.use_windows_presenter {
-            return windows_presenter::run(self);
+        {
+            windows_presenter::run(self)
         }
-        let frame_queue = Arc::clone(&self.frame_queue);
-        let performance = self.performance.clone();
-        let stream_control = self.stream_control.clone();
-        let shutdown = Arc::clone(&self.shutdown);
-        let fatal_error = Arc::clone(&self.fatal_error);
-        let frame_wake = self.frame_wake.clone();
-        let title = self.title.clone();
-        let viewport = egui::ViewportBuilder::default()
-            .with_title(title.clone())
-            .with_inner_size([1280.0, 760.0])
-            .with_min_inner_size([640.0, 400.0]);
-        let options = direct_viewer_options(viewport);
-        let app_title = title.clone();
-        let result = eframe::run_native(
-            &title,
-            options,
-            Box::new(move |creation| {
-                install_system_cjk_font(&creation.egui_ctx);
-                configure_viewer_visuals(&creation.egui_ctx);
-                frame_wake.install_context(creation.egui_ctx.clone());
-                Ok(Box::new(ViewerApp::new(
-                    app_title,
-                    frame_queue,
-                    performance,
-                    stream_control,
-                    shutdown,
-                    fatal_error,
-                )))
-            }),
-        )
-        .map_err(|error| anyhow!("run native video window: {error}"));
-        self.shutdown.store(true, Ordering::Release);
-        result?;
-        if let Some(error) = mutex_lock(&self.fatal_error).clone() {
-            bail!("native viewer stopped: {error}");
+        #[cfg(not(windows))]
+        {
+            crate::ui::ensure_supported()
         }
-        Ok(())
     }
 }
 
@@ -1081,7 +930,7 @@ fn decoder_manager(
     shutdown: Arc<AtomicBool>,
     fatal_error: Arc<Mutex<Option<String>>>,
     receiver_feedback: mpsc::UnboundedSender<VideoReceiverFeedback>,
-    mut startup_sender: Option<oneshot::Sender<Result<DecoderStartup, String>>>,
+    mut startup_sender: Option<oneshot::Sender<Result<(), String>>>,
 ) {
     if shutdown.load(Ordering::Acquire) {
         return;
@@ -1207,10 +1056,7 @@ fn decoder_manager(
                     );
                     performance.set_decoder(decoder.label());
                     if let Some(sender) = startup_sender.take() {
-                        let _ = sender.send(Ok(DecoderStartup {
-                            #[cfg(windows)]
-                            use_windows_presenter: decoder.outputs_native_surface(),
-                        }));
+                        let _ = sender.send(Ok(()));
                     }
                     let opened_pool = DecoderPool::new(
                         decoder,
@@ -1661,232 +1507,6 @@ fn timing_for_timestamp(
     None
 }
 
-struct ViewerApp {
-    title: String,
-    frame_queue: FrameQueue,
-    performance: PerformanceMonitor,
-    stream_control: StreamControlHandle,
-    stream_control_ui: StreamControlUi,
-    shutdown: Arc<AtomicBool>,
-    fatal_error: Arc<Mutex<Option<String>>>,
-    texture: Option<egui::TextureHandle>,
-    performance_mode: PerformancePanelMode,
-    has_frame: bool,
-    _session: Option<NativeViewerSession>,
-}
-
-impl ViewerApp {
-    fn new(
-        title: String,
-        frame_queue: FrameQueue,
-        performance: PerformanceMonitor,
-        stream_control: StreamControlHandle,
-        shutdown: Arc<AtomicBool>,
-        fatal_error: Arc<Mutex<Option<String>>>,
-    ) -> Self {
-        Self {
-            title,
-            frame_queue,
-            performance,
-            stream_control,
-            stream_control_ui: StreamControlUi::default(),
-            shutdown,
-            fatal_error,
-            texture: None,
-            performance_mode: PerformancePanelMode::Compact,
-            has_frame: false,
-            _session: None,
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn from_session(session: NativeViewerSession, preferences: ViewerPreferences) -> Self {
-        Self {
-            title: session.title.clone(),
-            frame_queue: Arc::clone(&session.frame_queue),
-            performance: session.performance.clone(),
-            stream_control: session.stream_control.clone(),
-            stream_control_ui: StreamControlUi::default(),
-            shutdown: Arc::clone(&session.shutdown),
-            fatal_error: Arc::clone(&session.fatal_error),
-            texture: None,
-            performance_mode: preferences.performance_mode,
-            has_frame: false,
-            _session: Some(session),
-        }
-    }
-
-    fn receive_frame(&mut self, ctx: &egui::Context) -> Result<()> {
-        let frame = {
-            let mut queue = mutex_lock(&self.frame_queue);
-            take_next_frame(&mut queue, &self.performance)
-        };
-        let Some(frame) = frame else {
-            return Ok(());
-        };
-        let surface_started = Instant::now();
-        let render_queue_delay = surface_started.duration_since(frame.decoded_at);
-        let pixels = frame
-            .surface
-            .into_cpu_rgba8(frame.width, frame.height, frame.color)?;
-        let (pixels, display_width, display_height) =
-            rotate_rgba(pixels, frame.width, frame.height, frame.rotation);
-        let pixels = bytemuck::allocation::cast_vec::<Rgba8, egui::Color32>(pixels);
-        let surface_transfer_delay = surface_started.elapsed();
-        let image =
-            egui::ColorImage::new([display_width as usize, display_height as usize], pixels);
-        if let Some(texture) = self.texture.as_mut() {
-            texture.set(image, egui::TextureOptions::LINEAR);
-        } else {
-            self.texture =
-                Some(ctx.load_texture("uu-remote-video", image, egui::TextureOptions::LINEAR));
-        }
-        self.performance.record_rendered_frame(RenderedFrameTiming {
-            is_new_picture: frame.is_new_picture,
-            width: frame.width,
-            height: frame.height,
-            decoded_at: frame.decoded_at,
-            local: frame.received_at.elapsed(),
-            assembly: frame.assembly_delay,
-            input_queue: frame.input_queue_delay,
-            decode_pipeline: frame.decode_pipeline_delay,
-            surface_transfer: surface_transfer_delay,
-            present_wait: Duration::ZERO,
-            render_queue: render_queue_delay,
-            sender_capture_at: frame.sender_timing.capture_at,
-            sender_capture: frame.sender_timing.capture_delay,
-            sender_encode: frame.sender_timing.encode_delay,
-            sender_pacer: frame.sender_timing.pacer_delay,
-            sender_total: frame.sender_timing.sending_delay,
-            transport: frame.sender_timing.transport_delay,
-        });
-        self.has_frame = true;
-        Ok(())
-    }
-
-    fn performance_window(&self, ctx: &egui::Context) {
-        show_performance_overlay(
-            ctx,
-            &self.performance,
-            &self.stream_control.audio(),
-            self.performance_mode,
-            "performance-grid",
-        );
-    }
-}
-
-fn rotate_rgba(
-    pixels: Vec<Rgba8>,
-    width: u32,
-    height: u32,
-    rotation: u16,
-) -> (Vec<Rgba8>, u32, u32) {
-    if rotation == 0 || pixels.is_empty() {
-        return (pixels, width, height);
-    }
-    let width_usize = width as usize;
-    let height_usize = height as usize;
-    let mut output = vec![Rgba8([0; 4]); pixels.len()];
-    match rotation {
-        90 => {
-            for y in 0..height_usize {
-                for x in 0..width_usize {
-                    output[x * height_usize + (height_usize - 1 - y)] = pixels[y * width_usize + x];
-                }
-            }
-            (output, height, width)
-        }
-        180 => {
-            for (destination, source) in output.iter_mut().zip(pixels.iter().rev()) {
-                *destination = *source;
-            }
-            (output, width, height)
-        }
-        270 => {
-            for y in 0..height_usize {
-                for x in 0..width_usize {
-                    output[(width_usize - 1 - x) * height_usize + y] = pixels[y * width_usize + x];
-                }
-            }
-            (output, height, width)
-        }
-        _ => (pixels, width, height),
-    }
-}
-
-impl eframe::App for ViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        if ctx.input(|input| input.key_pressed(egui::Key::F3)) {
-            self.performance_mode = self.performance_mode.next();
-        }
-        if self.shutdown.load(Ordering::Acquire) {
-            ui.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-        if let Err(error) = self.receive_frame(&ctx) {
-            *mutex_lock(&self.fatal_error) = Some(format!("render decoded surface: {error:#}"));
-            self.shutdown.store(true, Ordering::Release);
-            return;
-        }
-        egui::Panel::top("viewer-toolbar")
-            .frame(
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(12, 16, 23))
-                    .inner_margin(egui::Margin::symmetric(10, 3))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(34, 41, 54))),
-            )
-            .show(ui, |ui| {
-                performance_toolbar(
-                    ui,
-                    &self.title,
-                    &self.performance,
-                    &mut self.performance_mode,
-                    &mut self.stream_control_ui,
-                );
-            });
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
-            .show(ui, |ui| {
-                if let Some(texture) = self.texture.as_ref() {
-                    let available = ui.available_size();
-                    ui.centered_and_justified(|ui| {
-                        ui.add(
-                            egui::Image::new(texture)
-                                .fit_to_exact_size(available)
-                                .maintain_aspect_ratio(true),
-                        );
-                    });
-                } else if let Some(error) = mutex_lock(&self.fatal_error).clone() {
-                    ui.centered_and_justified(|ui| {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    });
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.spinner();
-                        ui.label(if self.has_frame {
-                            "等待下一帧"
-                        } else {
-                            "正在等待关键帧并初始化原生解码器…"
-                        });
-                    });
-                }
-            });
-        show_stream_control_window(&ctx, &self.stream_control, &mut self.stream_control_ui);
-        self.performance_window(&ctx);
-        let repaint_after = if mutex_lock(&self.frame_queue).is_empty() {
-            Duration::from_secs(1)
-        } else {
-            Duration::ZERO
-        };
-        ctx.request_repaint_after(repaint_after);
-    }
-
-    fn on_exit(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-    }
-}
-
 pub(super) fn show_performance_overlay(
     ctx: &egui::Context,
     performance: &PerformanceMonitor,
@@ -1917,101 +1537,6 @@ impl PerformancePanelMode {
             Self::Hidden => Self::Compact,
         }
     }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Hidden => "性能：关闭",
-            Self::Compact => "性能：简洁",
-            Self::Detailed => "性能：详细",
-        }
-    }
-}
-
-fn performance_toolbar(
-    ui: &mut egui::Ui,
-    title: &str,
-    performance: &PerformanceMonitor,
-    mode: &mut PerformancePanelMode,
-    stream_control_ui: &mut StreamControlUi,
-) {
-    let stats = performance.snapshot();
-    ui.set_min_height(42.0);
-    ui.horizontal_centered(|ui| {
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(title)
-                .size(14.0)
-                .strong()
-                .color(egui::Color32::WHITE),
-        );
-        ui.add_space(6.0);
-        viewer_badge(ui, &stats.connection, connection_color(&stats.connection));
-        viewer_badge(
-            ui,
-            &stats.video_codec,
-            egui::Color32::from_rgb(148, 176, 220),
-        );
-        if let Some((width, height)) = stats.decoded_resolution {
-            ui.label(
-                egui::RichText::new(format!("{width}×{height}"))
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(143, 155, 174)),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(4.0);
-            if ui
-                .add(
-                    egui::Button::new(mode.label())
-                        .selected(!matches!(mode, PerformancePanelMode::Hidden)),
-                )
-                .on_hover_text("按 F3 也可循环切换")
-                .clicked()
-            {
-                *mode = mode.next();
-            }
-            if ui
-                .add(
-                    egui::Button::new(egui::RichText::new("画质设置").color(
-                        if stream_control_ui.budget_notice.is_some() {
-                            warning_color()
-                        } else {
-                            ui.visuals().text_color()
-                        },
-                    ))
-                    .selected(stream_control_ui.open),
-                )
-                .on_hover_text(
-                    stream_control_ui
-                        .budget_notice
-                        .as_deref()
-                        .unwrap_or("画质与串流设置"),
-                )
-                .clicked()
-            {
-                stream_control_ui.open = !stream_control_ui.open;
-            }
-            ui.label(
-                egui::RichText::new(format!(
-                    "{:.0} FPS  ·  {:.1} Mbps",
-                    stats.actual_fps.max(1.0),
-                    stats.bitrate_mbps
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(151, 164, 183)),
-            );
-        });
-    });
-}
-
-fn viewer_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.12))
-        .corner_radius(18.0)
-        .inner_margin(egui::Margin::symmetric(8, 3))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(10.0).color(color));
-        });
 }
 
 const COMPACT_HUD_WIDTH: f32 = 120.0;
