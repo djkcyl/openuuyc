@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
             "UPX is unavailable"
         );
     }
-    let source = build(&root, options.build_directory)?;
+    let (source, version) = build(&root, options.build_directory)?;
     ensure!(
         source.is_file()
             && source
@@ -70,7 +70,9 @@ fn main() -> Result<()> {
     );
     let original_hash = file_hash(&source)?;
     let original_bytes = source.metadata()?.len();
-    check_startup(&source, &root)?;
+    let architecture = pe_architecture(&source)?;
+    let file_name = format!("OpenUUYC-v{version}-windows-{architecture}.exe");
+    check_startup(&source, &root, &version)?;
 
     let target = root.join("target");
     fs::create_dir_all(&target)?;
@@ -84,7 +86,7 @@ fn main() -> Result<()> {
             .starts_with(target.canonicalize()?),
         "invalid staging directory"
     );
-    let candidate = stage.path().join("OpenUUYC.exe");
+    let candidate = stage.path().join(&file_name);
     if options.upx {
         ensure!(
             command("upx")
@@ -103,7 +105,7 @@ fn main() -> Result<()> {
     } else {
         fs::copy(&source, &candidate)?;
     }
-    check_startup(&candidate, &root)?;
+    check_startup(&candidate, &root, &version)?;
     ensure!(
         file_hash(&source)? == original_hash,
         "original build changed during packaging"
@@ -113,14 +115,14 @@ fn main() -> Result<()> {
         .join("dist")
         .join(if options.upx { "upx" } else { "raw" });
     fs::create_dir_all(&destination)?;
-    fs::copy(&candidate, destination.join("OpenUUYC.exe"))
-        .context("publish executable (close it first if in use)")?;
+    let published = destination.join(file_name);
+    fs::copy(&candidate, &published).context("publish executable (close it first if in use)")?;
 
     println!(
         "EXE: {:.2} -> {:.2} MiB; output: {}",
         original_bytes as f64 / 1048576.0,
         candidate.metadata()?.len() as f64 / 1048576.0,
-        destination.display()
+        published.display()
     );
     // Only this freshly created directory is removed; build and published files remain.
     stage.close()?;
@@ -137,9 +139,9 @@ fn command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-fn build(root: &Path, directory: Option<PathBuf>) -> Result<PathBuf> {
+fn build(root: &Path, directory: Option<PathBuf>) -> Result<(PathBuf, String)> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = command(cargo)
+    let output = command(&cargo)
         .current_dir(root)
         .args([
             "build",
@@ -170,7 +172,13 @@ fn build(root: &Path, directory: Option<PathBuf>) -> Result<PathBuf> {
             && message["target"]["name"] == "OpenUUYC"
             && let Some(path) = message["executable"].as_str()
         {
-            executables.push(PathBuf::from(path));
+            executables.push((
+                PathBuf::from(path),
+                message["package_id"]
+                    .as_str()
+                    .context("artifact package ID missing")?
+                    .to_owned(),
+            ));
         }
     }
     ensure!(output.status.success(), "Cargo release build failed");
@@ -178,8 +186,57 @@ fn build(root: &Path, directory: Option<PathBuf>) -> Result<PathBuf> {
         executables.len() == 1,
         "Cargo did not identify one OpenUUYC executable"
     );
+    let (path, package_id) = executables.pop().unwrap();
+    let metadata = command(cargo)
+        .current_dir(root)
+        .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
+        .stderr(Stdio::inherit())
+        .output()
+        .context("read built package version")?;
+    ensure!(metadata.status.success(), "Cargo metadata failed");
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)?;
+    let package = metadata["packages"]
+        .as_array()
+        .context("missing Cargo packages")?
+        .iter()
+        .find(|package| package["id"] == package_id)
+        .context("built package no longer matches Cargo metadata")?;
+    let version = package["version"]
+        .as_str()
+        .context("missing package version")?
+        .to_owned();
+    ensure!(
+        version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')),
+        "package version is not a valid filename component"
+    );
     // UPX does not accept Rust's Windows verbatim-path prefix on ordinary paths.
-    dunce::canonicalize(executables.pop().unwrap()).context("resolve built executable")
+    Ok((
+        dunce::canonicalize(path).context("resolve built executable")?,
+        version,
+    ))
+}
+
+fn pe_architecture(path: &Path) -> Result<&'static str> {
+    let mut file = File::open(path)?;
+    let mut dos = [0; 64];
+    file.read_exact(&mut dos)
+        .context("read executable DOS header")?;
+    ensure!(&dos[..2] == b"MZ", "executable is not a PE image");
+    let offset = u32::from_le_bytes(dos[60..64].try_into()?);
+    file.seek(SeekFrom::Start(u64::from(offset)))?;
+    let mut pe = [0; 6];
+    file.read_exact(&mut pe)
+        .context("read executable PE header")?;
+    ensure!(&pe[..4] == b"PE\0\0", "invalid PE signature");
+    // Read the built image, not the host running this task, to label cross builds correctly.
+    match u16::from_le_bytes([pe[4], pe[5]]) {
+        0x8664 => Ok("x86_64"),
+        0x014c => Ok("i686"),
+        0xaa64 => Ok("aarch64"),
+        machine => bail!("unsupported Windows architecture: {machine:#x}"),
+    }
 }
 
 fn file_hash(path: &Path) -> Result<Vec<u8>> {
@@ -196,7 +253,7 @@ fn file_hash(path: &Path) -> Result<Vec<u8>> {
     Ok(hash.finalize().to_vec())
 }
 
-fn check_startup(executable: &Path, root: &Path) -> Result<()> {
+fn check_startup(executable: &Path, root: &Path, version: &str) -> Result<()> {
     let mut child = command(executable)
         .arg("--version")
         .current_dir(root)
@@ -237,9 +294,7 @@ fn check_startup(executable: &Path, root: &Path) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("check error reader failed"))??;
     ensure!(
         status.success()
-            && String::from_utf8_lossy(&output)
-                .trim()
-                .starts_with("OpenUUYC "),
+            && String::from_utf8_lossy(&output).trim() == format!("OpenUUYC {version}"),
         "release startup check failed: {}",
         String::from_utf8_lossy(&errors)
     );
