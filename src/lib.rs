@@ -27,6 +27,8 @@ mod nrd_http;
 pub mod official_receiver;
 pub mod performance;
 mod presence;
+mod remote_cursor;
+mod remote_input;
 mod rsfec;
 pub mod rtc;
 mod rtcp_timing;

@@ -18,8 +18,7 @@ const RATE: u32 = 48_000;
 const BLOCK: usize = 480;
 const MAX_SAMPLES: usize = 5_760;
 const MAX_PACKET: usize = 65_535;
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AudioSettings {
     pub volume: u8,
     pub muted: bool,
@@ -52,17 +51,26 @@ struct Shared {
     concealed: AtomicU64,
     callbacks: AtomicU64,
     peak: AtomicU32,
-    output_level: OutputLevel,
+    input_level: StereoLevel,
+    output_level: StereoLevel,
+    preference_updates: tokio::sync::watch::Sender<Option<AudioSettings>>,
+}
+
+impl Shared {
+    fn clear_levels(&self) {
+        self.input_level.clear();
+        self.output_level.clear();
+    }
 }
 
 // One published sample for all windows. Reading the meter never consumes a
-// peak or touches the audio queue. Release is visual only, after output gain.
-struct OutputLevel {
+// peak or touches the audio queue. Release is visual only; PCM is unchanged.
+struct StereoLevel {
     origin: Instant,
     sample: AtomicU64,
 }
 
-impl OutputLevel {
+impl StereoLevel {
     fn new() -> Self {
         Self {
             origin: Instant::now(),
@@ -130,7 +138,9 @@ impl AudioPlayback {
                 concealed: AtomicU64::new(0),
                 callbacks: AtomicU64::new(0),
                 peak: AtomicU32::new(0),
-                output_level: OutputLevel::new(),
+                input_level: StereoLevel::new(),
+                output_level: StereoLevel::new(),
+                preference_updates: tokio::sync::watch::channel(None).0,
             }),
             worker: Mutex::new(None),
         }))
@@ -145,13 +155,35 @@ impl AudioPlayback {
     }
 
     pub fn set_settings(&self, settings: AudioSettings) {
-        self.0.shared.settings.store(
-            u32::from(settings.volume.min(100)) | (u32::from(settings.muted) << 8),
-            Ordering::Relaxed,
-        );
+        let settings = AudioSettings {
+            volume: settings.volume.min(100),
+            ..settings
+        };
+        let bits = u32::from(settings.volume) | (u32::from(settings.muted) << 8);
+        let previous = self.0.shared.settings.swap(bits, Ordering::Relaxed);
         if settings.muted || settings.volume == 0 {
             self.0.shared.output_level.clear();
         }
+        if previous != bits {
+            self.0
+                .shared
+                .preference_updates
+                .send_replace(Some(settings));
+        }
+    }
+
+    pub(crate) fn preference_updates(&self) -> tokio::sync::watch::Receiver<Option<AudioSettings>> {
+        self.0.shared.preference_updates.subscribe()
+    }
+
+    /// Unity-gain reference at the device-channel mix, before volume/mute.
+    /// This is a current display peak, not the lifetime diagnostic `peak`.
+    pub fn input_levels(&self) -> [f32; 2] {
+        if self.0.shared.stopped.load(Ordering::Acquire) {
+            return [0.0; 2];
+        }
+        let meter = &self.0.shared.input_level;
+        meter.levels_at(meter.origin.elapsed().as_millis() as u32)
     }
 
     pub fn output_levels(&self) -> [f32; 2] {
@@ -182,7 +214,7 @@ impl AudioPlayback {
         let shared = &self.0.shared;
         let generation = shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         shared.receiving.store(false, Ordering::Relaxed);
-        shared.output_level.clear();
+        shared.clear_levels();
         if !codec.eq_ignore_ascii_case("audio/opus") || rate != RATE || channels != 2 {
             lock(&shared.status).1 = Some(format!(
                 "暂不支持音频格式：{codec} / {rate} Hz / {channels} 声道"
@@ -242,7 +274,7 @@ impl AudioPlayback {
 
     pub async fn close(&self) {
         self.0.shared.stopped.store(true, Ordering::Release);
-        self.0.shared.output_level.clear();
+        self.0.shared.clear_levels();
         let worker = lock(&self.0.worker).take();
         if let Some(worker) = worker {
             worker.thread().unpark();
@@ -458,6 +490,7 @@ fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     (bits & 255) as f32 / 100.0
                 };
                 let mut peaks = [0.0_f32; 2];
+                let mut input_peaks = [0.0_f32; 2];
                 for frame in output.chunks_mut(channels) {
                     let pair = if decode_failed.load(Ordering::Acquire) {
                         [0.0; 2]
@@ -473,22 +506,27 @@ fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                         } else {
                             pair.get(channel).copied().unwrap_or(0.0)
                         };
+                        let input_peak = value.abs();
                         let value = (value * gain).clamp(-1.0, 1.0);
                         if channels == 1 {
+                            input_peaks[0] = input_peaks[0].max(input_peak);
+                            input_peaks[1] = input_peaks[0];
                             peaks[0] = peaks[0].max(value.abs());
                             peaks[1] = peaks[0];
                         } else if channel < 2 {
+                            input_peaks[channel] = input_peaks[channel].max(input_peak);
                             peaks[channel] = peaks[channel].max(value.abs());
                         }
                         *sample = T::from_sample(value);
                     }
                 }
+                shared.input_level.record(input_peaks);
                 shared.output_level.record(peaks);
             },
             move |error| {
                 // Only an actual endpoint/stream error triggers rebuild; video is unaffected.
                 lock(&errors.status).1 = Some(format!("音频输出中断：{error}"));
-                errors.output_level.clear();
+                errors.clear_levels();
                 failed.store(true, Ordering::Release);
             },
             None,
@@ -541,13 +579,13 @@ fn output_worker(shared: Arc<Shared>) {
             if id != current_id || retry || generation != current_generation {
                 failures = 0;
                 stream = None;
-                shared.output_level.clear();
+                shared.clear_levels();
                 current_id = id;
                 current_generation = generation;
             }
             if failed.swap(false, Ordering::AcqRel) {
                 stream = None;
-                shared.output_level.clear();
+                shared.clear_levels();
                 failures += 1;
                 lock(&shared.status)
                     .1
@@ -581,7 +619,7 @@ fn output_worker(shared: Arc<Shared>) {
         std::thread::park_timeout(Duration::from_millis(100));
     }
     drop(stream);
-    shared.output_level.clear();
+    shared.clear_levels();
     tracing::info!(
         output_samples = shared.output_samples.load(Ordering::Relaxed),
         concealed_samples = shared.concealed.load(Ordering::Relaxed),

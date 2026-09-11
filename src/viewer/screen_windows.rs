@@ -20,6 +20,10 @@ pub(super) struct ScreenTabBar {
 }
 
 impl ScreenTabBar {
+    pub(super) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn draw(&mut self, ui: &mut egui::Ui, window: &Window) {
         let width = ui.available_width();
         let mut row = ui.new_child(
@@ -214,11 +218,19 @@ impl ScreenWindows {
         Some(slot.window)
     }
 
-    pub fn window_event(&mut self, id: WindowId, event: &WindowEvent) {
+    pub fn window_event(
+        &mut self,
+        id: WindowId,
+        event: &WindowEvent,
+        event_loop: &ActiveEventLoop,
+    ) {
         let Some(slot) = self.windows.get_mut(&id) else {
             return;
         };
         if *event == WindowEvent::CloseRequested {
+            if let Some(app) = slot.app.as_mut() {
+                app.mouse.release(&slot.window);
+            }
             slot.close = true;
             return;
         }
@@ -248,7 +260,7 @@ impl ScreenWindows {
             slot.last_frame = Some(Instant::now());
         }
         if let Some(app) = slot.app.as_mut() {
-            if let Err(error) = app.on_window_event(&slot.window, event) {
+            if let Err(error) = app.on_window_event(&slot.window, event, event_loop) {
                 tracing::error!(%error, "screen window presentation failed");
                 app.screen_tabs.error = Some(format!("{error:#}"));
             }
@@ -311,6 +323,9 @@ impl ScreenWindows {
             return Ok(());
         }
         let cancelled_pending = slot.pending.take().map(|pending| pending.id);
+        if let Some(app) = slot.app.as_mut() {
+            app.mouse.release(&slot.window);
+        }
         let (progress, receiver) = std_mpsc::channel();
         let _ = progress.send(ConnectionProgress::working(
             10,
@@ -357,6 +372,9 @@ impl ScreenWindows {
             return;
         };
         slot.pending.take();
+        if let Some(app) = slot.app.as_mut() {
+            app.mouse.release(&slot.window);
+        }
         slot.app.take();
         if let Some(target) = self.windows.values_mut().next() {
             for screen in slot.tabs {
@@ -666,6 +684,11 @@ impl ScreenWindows {
         self.sync_bars();
         let mut wake = self.next_refresh;
         for slot in self.windows.values_mut() {
+            if !slot.window.has_focus()
+                && let Some(app) = slot.app.as_mut()
+            {
+                app.refresh_mouse(&slot.window, event_loop);
+            }
             if let Some(at) = slot.repaint {
                 if at <= now {
                     slot.window.request_redraw();
@@ -673,6 +696,15 @@ impl ScreenWindows {
                 } else {
                     wake = wake.min(at);
                 }
+            }
+        }
+        // Retire old owners first; only the foreground window installs input
+        // and cursor presentation, regardless of HashMap iteration order.
+        for slot in self.windows.values_mut() {
+            if slot.window.has_focus()
+                && let Some(app) = slot.app.as_mut()
+            {
+                app.refresh_mouse(&slot.window, event_loop);
             }
         }
         if self.windows.is_empty() {
@@ -685,6 +717,11 @@ impl ScreenWindows {
 
 impl Drop for ScreenWindows {
     fn drop(&mut self) {
+        for slot in self.windows.values_mut() {
+            if let Some(app) = slot.app.as_mut() {
+                app.mouse.release(&slot.window);
+            }
+        }
         for session in self.sessions.values() {
             session.close_handle().close();
         }

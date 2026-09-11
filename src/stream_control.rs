@@ -21,6 +21,8 @@ use crate::capability::{DualCapability, FrameQualityCapability};
 use crate::media::{ConnectionMediaProfile, FrameRateChoice, LocalDisplayInfo, VideoCodec};
 pub use crate::network_control::NetworkControlSnapshot;
 use crate::performance::PerformanceMonitor;
+pub use crate::remote_cursor::{CursorImage, RemoteCursor};
+pub use crate::remote_input::MouseMode;
 
 const VIDEO_QUALITY_FAST: i32 = 1;
 const VIDEO_QUALITY_GENERAL: i32 = 2;
@@ -174,6 +176,12 @@ pub struct RemoteScreen {
 
 #[derive(Clone, Debug)]
 pub struct StreamControlSnapshot {
+    pub mouse_preference: MouseMode,
+    pub mouse_mode: MouseMode,
+    pub mouse_pending: bool,
+    pub mouse_error: Option<String>,
+    pub cursor_pending: bool,
+    pub cursor_error: Option<String>,
     pub local_display: LocalDisplayInfo,
     pub settings: StreamControlSettings,
     pub remote_display: Option<RemoteDisplayState>,
@@ -198,6 +206,8 @@ pub struct StreamControlSnapshot {
 
 #[derive(Clone)]
 pub struct StreamControlHandle {
+    mouse: crate::remote_input::RemoteInput,
+    cursor: crate::remote_cursor::RemoteCursorState,
     audio: crate::audio::AudioPlayback,
     network: crate::network_control::NetworkControl,
     shared: Arc<Mutex<StreamControlState>>,
@@ -258,6 +268,17 @@ struct ScreenBaseline {
 }
 
 struct StreamControlState {
+    preferred_mouse_mode: MouseMode,
+    remote_cursor: crate::remote_cursor::RemoteCursorState,
+    peer_mouse_relative: Option<bool>,
+    mouse_policy_waiting: bool,
+    mouse_restore_point: Option<(i32, [f64; 2])>,
+    mouse: crate::remote_input::RemoteInput,
+    mouse_transition: Option<(i64, MouseMode)>,
+    mouse_restore_pending: bool,
+    mouse_transport_connected: bool,
+    cursor_pending: Option<(i64, bool, Instant)>,
+    cursor_error: Option<String>,
     available_video_tracks: Vec<i32>,
     registered_video_tracks: Vec<i32>,
     track_registration: Option<(i64, Vec<i32>)>,
@@ -288,6 +309,7 @@ struct StreamControlState {
     preference_updates: tokio::sync::watch::Sender<Option<StreamControlSettings>>,
     user_preference_pending: Option<(i64, StreamControlSettings)>,
     persistence_error: Option<String>,
+    audio_persistence_error: Option<String>,
     performance: PerformanceMonitor,
 }
 
@@ -307,7 +329,20 @@ impl StreamControlHandle {
             .local_display
             .refresh_hz
             .clamp(1, profile.stream_fps.max(1));
+        let mouse = crate::remote_input::RemoteInput::default();
+        let cursor = crate::remote_cursor::RemoteCursorState::default();
         let state = StreamControlState {
+            preferred_mouse_mode: MouseMode::Smart,
+            remote_cursor: cursor.clone(),
+            peer_mouse_relative: None,
+            mouse_policy_waiting: false,
+            mouse_restore_point: None,
+            mouse: mouse.clone(),
+            mouse_transition: None,
+            mouse_restore_pending: false,
+            mouse_transport_connected: false,
+            cursor_pending: None,
+            cursor_error: None,
             available_video_tracks: Vec::new(),
             registered_video_tracks: Vec::new(),
             track_registration: None,
@@ -330,7 +365,9 @@ impl StreamControlHandle {
                 fps_count,
                 frame_quality: VIDEO_QUALITY_AUTO,
                 auto_frame_quality: VIDEO_QUALITY_BLURAY,
-                cursor_capture: false,
+                // Independent CursorShape coordinates are only sampled at
+                // shape changes. Watching needs capture-side cursor motion.
+                cursor_capture: true,
                 chroma_format: CHROMA_420,
                 max_custom_bitrate: 0,
                 enable_hdr: false,
@@ -360,6 +397,7 @@ impl StreamControlHandle {
             preference_updates: tokio::sync::watch::channel(None).0,
             user_preference_pending: None,
             persistence_error: None,
+            audio_persistence_error: None,
             performance,
         };
         state.performance.set_quality(viewing_quality_label(&state));
@@ -370,6 +408,8 @@ impl StreamControlHandle {
         });
         (
             Self {
+                mouse,
+                cursor,
                 audio,
                 network: crate::network_control::NetworkControl::new(),
                 shared: Arc::new(Mutex::new(state)),
@@ -382,8 +422,74 @@ impl StreamControlHandle {
         )
     }
 
+    /// Last independent shape notification for a future local-input presenter.
+    /// Its position is sampled at shape change, not continuous motion tracking.
+    /// Watching uses capture-side composition instead of a stale local overlay.
+    pub(crate) fn mouse(&self) -> &crate::remote_input::RemoteInput {
+        &self.mouse
+    }
+
+    pub(crate) fn set_mouse_transport_ready(&self, connected: bool) {
+        let mut state = lock(&self.shared);
+        state.mouse_transport_connected = connected;
+        if !connected {
+            state.peer_mouse_relative = None;
+            state.mouse_policy_waiting = false;
+            state.mouse_restore_point = None;
+            state.mouse_restore_pending = false;
+            // Reconnect always starts in View, even after a failed mode change.
+            state.baseline.cursor_capture = true;
+            state.initial_capture_sync_sent = false;
+            if let Some((sequence, _)) = state.mouse_transition.take() {
+                fail_cursor_request(&mut state, sequence, "鼠标连接已中断".into());
+                state
+                    .pending_sequences
+                    .retain(|pending| *pending != sequence);
+            }
+            state.mouse.set_ready(false);
+        } else {
+            state.mouse.set_ready(
+                state.pb_connected && state.control_channel_open && state.text_channel_open,
+            );
+            self.maybe_send_initial_capture_sync(&mut state);
+        }
+    }
+
+    pub(crate) fn mouse_screen(&self, track: i32) -> Option<(i32, u32, u32)> {
+        let s = lock(&self.shared);
+        let screen = s
+            .screens
+            .iter()
+            .find(|screen| screen.video_track_index == track && screen.id >= 0)?;
+        Some((screen.id, screen.width, screen.height))
+    }
+
+    pub(crate) fn take_mouse_restore_point(&self, track: i32) -> Option<[f64; 2]> {
+        let mut s = lock(&self.shared);
+        let screen = s
+            .screens
+            .iter()
+            .find(|screen| screen.video_track_index == track)?
+            .id;
+        if s.mouse.mode() == MouseMode::Smart
+            && s.mouse_restore_point.is_some_and(|(id, _)| id == screen)
+        {
+            s.mouse_restore_point.take().map(|(_, point)| point)
+        } else {
+            None
+        }
+    }
+
+    pub fn remote_cursor(&self) -> Option<RemoteCursor> {
+        self.cursor.snapshot()
+    }
+    pub(crate) fn remote_cursor_hidden(&self) -> bool {
+        self.cursor.hidden()
+    }
+
     pub fn snapshot(&self) -> StreamControlSnapshot {
-        let state = lock(&self.shared);
+        let mut state = lock(&self.shared);
+        expire_cursor_request(&mut state);
         let active_protocol = protocol(&state);
         let waiting_for = if !state.control_channel_open {
             Some("CONTROL 通道")
@@ -399,6 +505,18 @@ impl StreamControlHandle {
             None
         };
         StreamControlSnapshot {
+            mouse_preference: state.preferred_mouse_mode,
+            mouse_mode: if state.mouse_policy_waiting {
+                MouseMode::Smart
+            } else {
+                state
+                    .mouse_transition
+                    .map_or_else(|| state.mouse.mode(), |(_, mode)| mode)
+            },
+            mouse_pending: state.mouse_transition.is_some() || state.mouse_policy_waiting,
+            mouse_error: state.mouse.error(),
+            cursor_pending: state.cursor_pending.is_some(),
+            cursor_error: state.cursor_error.clone(),
             local_display: state.local_display,
             settings: state.settings,
             remote_display: state.remote_display,
@@ -429,7 +547,10 @@ impl StreamControlHandle {
             last_error: state.last_error.clone(),
             last_notice: state.last_notice.clone(),
             adaptive: state.budget.as_ref().map(BudgetPolicy::snapshot),
-            persistence_error: state.persistence_error.clone(),
+            persistence_error: state
+                .persistence_error
+                .clone()
+                .or_else(|| state.audio_persistence_error.clone()),
             network: self.network.snapshot(),
         }
     }
@@ -609,6 +730,10 @@ impl StreamControlHandle {
         lock(&self.shared).persistence_error = error;
     }
 
+    pub(crate) fn set_audio_persistence_error(&self, error: Option<String>) {
+        lock(&self.shared).audio_persistence_error = error;
+    }
+
     pub(crate) fn restore_preferences(&self, preferences: StreamControlPreferences) -> Result<()> {
         let mut state = lock(&self.shared);
         if state.initial_capture_sync_sent || state.baseline.codec_type != 0 {
@@ -638,9 +763,101 @@ impl StreamControlHandle {
         Ok(())
     }
 
+    pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
+        let mut state = lock(&self.shared);
+        expire_cursor_request(&mut state);
+        let previous = state.mouse.mode();
+        // Explicit user mode changes invalidate a deferred game-exit warp.
+        state.mouse_restore_point = None;
+        state.mouse_policy_waiting = false;
+        if mode == MouseMode::View {
+            // Revoke input immediately, even if capture negotiation is busy.
+            state.mouse.disable();
+            state.mouse_restore_pending = true;
+            if let Some((_, target)) = &mut state.mouse_transition {
+                *target = MouseMode::View;
+            }
+            if !state.pending_sequences.is_empty() {
+                return Ok(());
+            }
+        }
+        ensure_ready(&state)?;
+        if !state.pending_sequences.is_empty() {
+            bail!("输入已停止或等待设置确认，请稍后重试");
+        }
+        let (relative, visible) = mouse_policy(&state, mode);
+        if previous != MouseMode::View
+            && mode != MouseMode::View
+            && visible == state.baseline.cursor_capture
+        {
+            state.mouse.enable(mode, relative)?;
+            state.preferred_mouse_mode = mode;
+            return Ok(());
+        }
+        state.mouse_restore_pending = false;
+        state.mouse.disable();
+        let sequence = self.request_cursor_locked(&mut state, visible)?;
+        state.mouse_transition = Some((sequence, mode));
+        Ok(())
+    }
+
+    fn request_cursor_locked(&self, state: &mut StreamControlState, visible: bool) -> Result<i64> {
+        expire_cursor_request(state);
+        ensure_ready(state)?;
+        if !state.pending_sequences.is_empty() {
+            bail!("请等待当前串流设置确认");
+        }
+        let sequence = state.next_sequence;
+        let mut baseline = state.baseline;
+        baseline.cursor_capture = visible;
+        let active_protocol = protocol(state);
+        let payload = match active_protocol {
+            StreamControlProtocol::CaptureSetting { .. } => {
+                encode_capture_setting(sequence, baseline)?
+            }
+            StreamControlProtocol::LegacyCaptureConfig => {
+                encode_legacy_capture_config(sequence, baseline)?
+            }
+            StreamControlProtocol::Negotiating => bail!("PB 特性协商尚未完成"),
+        };
+        state.next_sequence = state.next_sequence.wrapping_add(1);
+        state.pending_sequences.push_back(sequence);
+        state.cursor_pending = Some((sequence, visible, Instant::now()));
+        state.initial_capture_sync_sent = true;
+        state.cursor_error = None;
+        state.last_error = None;
+        state.last_notice = None;
+        let result = self.send_locked(
+            state,
+            OutgoingControlMessage {
+                sequence,
+                payload,
+                protocol: active_protocol,
+                completion: None,
+            },
+            Some(
+                if visible {
+                    "显示远端光标"
+                } else {
+                    "隐藏远端光标"
+                }
+                .into(),
+            ),
+        );
+        if let Err(error) = &result {
+            fail_cursor_request(state, sequence, error.to_string());
+        }
+        tracing::info!(sequence, visible, "remote cursor visibility requested");
+        result
+    }
+
     pub fn apply(&self, settings: StreamControlSettings) -> Result<i64> {
         {
             let mut state = lock(&self.shared);
+            expire_cursor_request(&mut state);
+            if state.cursor_pending.is_some() {
+                bail!("请等待光标显示设置确认");
+            }
             ensure_ready(&state)?;
             let active_protocol = protocol(&state);
             if matches!(
@@ -809,6 +1026,10 @@ impl StreamControlHandle {
     ) {
         // No full performance snapshot/history sorting in the observer.
         let mut state = lock(&self.shared);
+        expire_cursor_request(&mut state);
+        if state.cursor_pending.is_some() {
+            return;
+        }
         if state.settings.quality != StreamQuality::Adaptive {
             return;
         }
@@ -849,6 +1070,9 @@ impl StreamControlHandle {
     }
 
     fn request_budget_locked(&self, state: &mut StreamControlState, cap: u32) -> Result<i64> {
+        if state.cursor_pending.is_some() {
+            bail!("请等待光标显示设置确认");
+        }
         ensure_ready(state)?;
         if state.settings.quality != StreamQuality::Adaptive
             || !protocol(state).supports_custom_bitrate()
@@ -902,6 +1126,10 @@ impl StreamControlHandle {
     /// failed bound. Routine recovery does not repeatedly hit that failed rate.
     pub fn reassess_budget(&self) -> Result<i64> {
         let mut state = lock(&self.shared);
+        expire_cursor_request(&mut state);
+        if state.cursor_pending.is_some() {
+            bail!("请等待光标显示设置确认");
+        }
         ensure_ready(&state)?;
         if state.settings.quality != StreamQuality::Adaptive {
             bail!("请先选择受限自适应");
@@ -939,6 +1167,16 @@ impl StreamControlHandle {
             _ => return,
         }
         if !open {
+            state.peer_mouse_relative = None;
+            state.mouse_policy_waiting = false;
+            state.mouse_restore_point = None;
+            state.mouse_restore_pending = false;
+            state.baseline.cursor_capture = true;
+            state.mouse.set_ready(false);
+            state.mouse_transition = None;
+            if let Some((sequence, _, _)) = state.cursor_pending {
+                fail_cursor_request(&mut state, sequence, "连接已断开，光标设置未确认".into());
+            }
             state.registered_video_tracks.clear();
             state.track_registration = None;
             state.track_registration_error = None;
@@ -953,7 +1191,13 @@ impl StreamControlHandle {
             state.pending_sequences.clear();
         }
         self.maybe_send_initial_capture_sync(&mut state);
+        if open && state.pb_connected && state.control_channel_open && state.text_channel_open {
+            state.mouse.set_ready(state.mouse_transport_connected);
+        }
         drop(state);
+        if !open {
+            self.cursor.clear();
+        }
         self.protocol_changed.notify_one();
     }
 
@@ -984,6 +1228,7 @@ impl StreamControlHandle {
 
     pub(crate) fn mark_send_failed(&self, sequence: i64, error: &str) {
         let mut state = lock(&self.shared);
+        fail_cursor_request(&mut state, sequence, error.to_owned());
         if state
             .track_registration
             .as_ref()
@@ -1034,8 +1279,28 @@ impl StreamControlHandle {
         payload: &[u8],
         source: PbMessageSource,
     ) -> Result<()> {
+        if payload.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+            return self.handle_mouse_command(payload, source);
+        }
         let message = PbControlMessage::decode(payload)
             .map_err(|error| anyhow!("decode UU protobuf domain message: {error}"))?;
+        if let Some(PbPayload::SystemStateChange(bytes)) = &message.payload {
+            let was_hidden = self.cursor.hidden();
+            let result = self.cursor.receive(bytes);
+            let mut state = lock(&self.shared);
+            if was_hidden
+                && !self.cursor.hidden()
+                && smart_mouse_requested(&state)
+                && let Some(cursor) = self.cursor.snapshot()
+                && let Some(point) = cursor.sampled_position
+            {
+                state.mouse_restore_point = Some((cursor.screen_id, point));
+            }
+            self.refresh_mouse_policy(&mut state);
+            drop(state);
+            self.mouse.repaint();
+            return result;
+        }
         let mut echo_response = None;
         let mut handshake_changed = false;
         let mut state = lock(&self.shared);
@@ -1058,6 +1323,11 @@ impl StreamControlHandle {
                             );
                         } else {
                             state.pb_connected = true;
+                            state.mouse.set_ready(
+                                state.mouse_transport_connected
+                                    && state.control_channel_open
+                                    && state.text_channel_open,
+                            );
                             handshake_changed = true;
                             state.last_error = None;
                             tracing::info!(
@@ -1130,6 +1400,17 @@ impl StreamControlHandle {
             _ => {}
         }
         self.maybe_send_initial_capture_sync(&mut state);
+        if state.mouse_restore_pending
+            && state.pending_sequences.is_empty()
+            && ensure_ready(&state).is_ok()
+        {
+            state.mouse_restore_pending = false;
+            match self.request_cursor_locked(&mut state, true) {
+                Ok(sequence) => state.mouse_transition = Some((sequence, MouseMode::View)),
+                Err(error) => state.mouse.fail(error.to_string()),
+            }
+        }
+        self.refresh_mouse_policy(&mut state);
         drop(state);
         if handshake_changed {
             self.protocol_changed.notify_one();
@@ -1140,6 +1421,112 @@ impl StreamControlHandle {
                 .map_err(|_| anyhow!("protobuf ECHO_RESPONSE sender has stopped"))?;
         }
         Ok(())
+    }
+
+    fn handle_mouse_command(&self, payload: &[u8], source: PbMessageSource) -> Result<()> {
+        if source != PbMessageSource::Control {
+            return Ok(());
+        }
+        anyhow::ensure!(payload.len() <= 16 * 1024, "mouse command too large");
+        let value: serde_json::Value = serde_json::from_slice(payload)?;
+        if value.get("action").and_then(|v| v.as_str()) != Some("special_game_mouse") {
+            return Ok(());
+        }
+        let mode = value
+            .get("mouse_mode")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("invalid mouse mode"))?;
+        let force = value
+            .get("force_mode")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| anyhow!("invalid force mode"))?;
+        let x = value.get("coordinate_x_scale");
+        let y = value.get("coordinate_y_scale");
+        let (relative, restore) = match mode {
+            0 | 1 => {
+                anyhow::ensure!(
+                    force && x.is_none() && y.is_none(),
+                    "invalid forced mouse command"
+                );
+                (Some(mode == 1), None)
+            }
+            2 => {
+                anyhow::ensure!(
+                    !force || (x.is_none() && y.is_none()),
+                    "invalid legacy mouse restore"
+                );
+                let restore = match (x, y) {
+                    (None, None) => None,
+                    (Some(x), Some(y)) => {
+                        let x = x
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("invalid mouse restore x"))?;
+                        let y = y
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("invalid mouse restore y"))?;
+                        anyhow::ensure!(
+                            x.is_finite()
+                                && y.is_finite()
+                                && (0.0..=1.0).contains(&x)
+                                && (0.0..=1.0).contains(&y),
+                            "mouse restore outside screen"
+                        );
+                        Some([x, y])
+                    }
+                    _ => bail!("mouse restore coordinates must appear together"),
+                };
+                (None, restore)
+            }
+            _ => bail!("unknown mouse mode"),
+        };
+        let mut state = lock(&self.shared);
+        state.peer_mouse_relative = relative;
+        state.mouse_restore_point = if smart_mouse_requested(&state) {
+            restore.and_then(|point| state.remote_display.map(|screen| (screen.screen_id, point)))
+        } else {
+            None
+        };
+        self.refresh_mouse_policy(&mut state);
+        drop(state);
+        self.mouse.repaint();
+        Ok(())
+    }
+
+    fn refresh_mouse_policy(&self, state: &mut StreamControlState) {
+        if state.mouse_transition.is_some() {
+            return;
+        }
+        if state.mouse.mode() != MouseMode::Smart && !state.mouse_policy_waiting {
+            return;
+        }
+        let (relative, visible) = mouse_policy(state, MouseMode::Smart);
+        if visible == state.baseline.cursor_capture {
+            if state.mouse_policy_waiting {
+                state.mouse_policy_waiting = false;
+                if let Err(error) = state.mouse.enable(MouseMode::Smart, relative) {
+                    state.mouse.fail(error.to_string());
+                }
+            } else if state.mouse.relative_mode() != relative {
+                // Automatic shape changes must not release a held fire button.
+                state.mouse.set_relative_mode(relative);
+            }
+        } else {
+            state.mouse.disable();
+            state.mouse_policy_waiting = true;
+            if !state.pending_sequences.is_empty() || ensure_ready(state).is_err() {
+                return;
+            }
+            match self.request_cursor_locked(state, visible) {
+                Ok(sequence) => {
+                    state.mouse_policy_waiting = false;
+                    state.mouse_transition = Some((sequence, MouseMode::Smart));
+                }
+                Err(error) => {
+                    state.mouse_policy_waiting = false;
+                    state.mouse.fail(error.to_string());
+                }
+            }
+        }
     }
 
     fn maybe_send_initial_capture_sync(&self, state: &mut StreamControlState) {
@@ -1572,6 +1959,30 @@ fn finish_request(
     if !state.pending_sequences.contains(&request_id) {
         return;
     }
+    if let Some((sequence, visible, _)) = state.cursor_pending
+        && sequence == request_id
+    {
+        if failures.is_empty() {
+            state.baseline.cursor_capture = visible;
+            state.cursor_pending = None;
+            state.cursor_error = None;
+            if let Some((mouse_sequence, mode)) = state.mouse_transition.take()
+                && mouse_sequence == request_id
+            {
+                let (relative, wanted_cursor) = mouse_policy(state, mode);
+                if mode == MouseMode::Smart && wanted_cursor != visible {
+                    state.mouse_policy_waiting = true;
+                } else if let Err(error) = state.mouse.enable(mode, relative) {
+                    state.mouse.fail(error.to_string());
+                } else if mode != MouseMode::View {
+                    state.preferred_mouse_mode = mode;
+                }
+            }
+            tracing::info!(visible, "remote cursor visibility confirmed");
+        } else {
+            fail_cursor_request(state, request_id, failures.join("; "));
+        }
+    }
     if let Some((sequence, settings)) = state.user_preference_pending
         && sequence == request_id
     {
@@ -1594,6 +2005,7 @@ fn finish_request(
             budget.acknowledge(request_id, Instant::now());
         }
         state.last_applied_sequence = Some(request_id);
+        state.cursor_error = None;
         state.last_error = None;
         state.last_notice = (!notices.is_empty()).then(|| notices.join("; "));
         state.performance.acknowledge_stream_switch(request_id);
@@ -1616,6 +2028,64 @@ fn finish_request(
             .performance
             .fail_stream_switch(request_id, error.clone());
         tracing::warn!(sequence = request_id, %error, "remote host rejected runtime stream settings");
+    }
+}
+
+fn smart_mouse_requested(state: &StreamControlState) -> bool {
+    state.mouse.mode() == MouseMode::Smart
+        || state.mouse_policy_waiting
+        || state
+            .mouse_transition
+            .is_some_and(|(_, mode)| mode == MouseMode::Smart)
+}
+
+fn mouse_policy(state: &StreamControlState, mode: MouseMode) -> (bool, bool) {
+    match mode {
+        MouseMode::View => (false, true),
+        MouseMode::Local => (false, false),
+        MouseMode::Remote => (true, true),
+        MouseMode::Smart => match state.peer_mouse_relative {
+            Some(true) => (true, true),
+            Some(false) => (false, false),
+            None => (state.remote_cursor.hidden(), false),
+        },
+    }
+}
+
+fn fail_cursor_request(state: &mut StreamControlState, sequence: i64, error: String) {
+    if state
+        .mouse_transition
+        .is_some_and(|(pending, _)| pending == sequence)
+    {
+        state.mouse_transition = None;
+        state.mouse_restore_point = None;
+        state.mouse.fail(format!("鼠标模式切换未确认：{error}"));
+    }
+    if state
+        .cursor_pending
+        .is_some_and(|(pending, _, _)| pending == sequence)
+    {
+        state.cursor_pending = None;
+        state.cursor_error = Some(error);
+    }
+}
+
+fn expire_cursor_request(state: &mut StreamControlState) {
+    if let Some((sequence, _, started)) = state.cursor_pending
+        && started.elapsed() >= std::time::Duration::from_secs(10)
+    {
+        let error = "光标设置确认超时，远端状态未知；请重试".to_owned();
+        fail_cursor_request(state, sequence, error.clone());
+        state
+            .pending_sequences
+            .retain(|pending| *pending != sequence);
+        state
+            .performance
+            .fail_stream_switch(sequence, error.clone());
+        state.last_error = Some(error);
+        if let Some(budget) = &mut state.budget {
+            budget.suspend();
+        }
     }
 }
 

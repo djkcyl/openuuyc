@@ -43,6 +43,7 @@ pub struct ControllerConnection {
     forwarder: RtpForwarder,
     profile: ConnectionMediaProfile,
     preference_writer: Option<crate::viewing_settings::PreferenceWriter>,
+    audio_preference_writer: Option<crate::viewing_settings::PreferenceWriter>,
 }
 
 pub struct ConnectionSummary {
@@ -84,6 +85,8 @@ struct ResolvedConnection {
     summary: ConnectionSummary,
     assist: Option<assist::AssistConnection>,
     preferences: Option<crate::stream_control::StreamControlPreferences>,
+    audio_preferences: Option<crate::audio::AudioSettings>,
+    target_platform: i32,
 }
 
 impl ResolvedConnection {
@@ -102,6 +105,7 @@ impl ResolvedConnection {
                 .join(&self.client, &self.controller_device_id, reporter, cancel)
                 .await?;
             self.target_device_id = reply.publisher_device_id.clone();
+            self.target_platform = reply.publisher_platform;
             if !reply.device_name.is_empty() {
                 self.summary.alias = reply.device_name.clone();
             }
@@ -164,6 +168,27 @@ impl ResolvedConnection {
                 Err(error) => persistence_error = Some(error.to_string()),
             }
         }
+        let mut audio_persistence_error = None;
+        if self.audio_preferences.is_none() {
+            let mut audio = crate::audio::AudioSettings {
+                volume: 100,
+                muted: false,
+            };
+            if let Some(store) = &store {
+                match cancellable(cancel, store.load_audio()).await {
+                    Ok(Some(saved)) => {
+                        tracing::debug!(?saved, "loaded audio settings for this device");
+                        audio = saved;
+                    }
+                    Ok(None) => {}
+                    Err(error) if cancel.is_cancelled() => return Err(error),
+                    Err(error) => audio_persistence_error = Some(error.to_string()),
+                }
+            }
+            // Startup --mute is temporary; only subsequent user edits persist.
+            audio.muted |= self.profile.muted;
+            self.audio_preferences = Some(audio);
+        }
         if let Some(preferences) = self.preferences {
             self.profile.stream_fps = preferences
                 .settings
@@ -182,13 +207,17 @@ impl ResolvedConnection {
             self.profile,
             self.transport,
             self.preferences,
+            self.audio_preferences.expect("resolved audio settings"),
             reporter,
             cancel,
         )
         .await?;
         let handle = connection.stream_control_handle();
+        handle.mouse().set_keyboard_platform(self.target_platform);
         handle.set_persistence_error(persistence_error);
-        connection.preference_writer = store.map(|store| store.bind(handle));
+        handle.set_audio_persistence_error(audio_persistence_error);
+        connection.preference_writer = store.clone().map(|store| store.bind(handle.clone()));
+        connection.audio_preference_writer = store.map(|store| store.bind_audio(handle));
         Ok(connection)
     }
 }
@@ -440,6 +469,7 @@ async fn run_viewer_connection_owner(
             match result {
                 Err(error) if retry_session_failure(&error) => {
                     resolved.preferences = Some(session_control.preferences());
+                    resolved.audio_preferences = Some(session_control.audio().settings());
                     retries += 1;
                     let (progress_tx, progress_rx) = std::sync::mpsc::channel();
                     let (display_tx, display_rx) = oneshot::channel();
@@ -511,12 +541,14 @@ impl ControllerConnection {
         Ok((video, codec))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn establish(
         room: RoomSession,
         controller_device_id: &str,
         profile: ConnectionMediaProfile,
         transport: crate::media::TransportChoice,
         preferences: Option<crate::stream_control::StreamControlPreferences>,
+        audio_settings: crate::audio::AudioSettings,
         reporter: Option<&ConnectionProgressReporter>,
         cancel: &CancellationToken,
     ) -> Result<Self> {
@@ -610,6 +642,10 @@ impl ControllerConnection {
             let _ = signal.close().await;
             return Err(error);
         }
+        // Restore before media can arrive or the playback window is exposed.
+        peer.stream_control_handle()
+            .audio()
+            .set_settings(audio_settings);
         peer.configure_network_control(transport, control.force_relay);
         report_progress(
             reporter,
@@ -726,6 +762,7 @@ impl ControllerConnection {
             forwarder,
             profile,
             preference_writer: None,
+            audio_preference_writer: None,
         })
     }
 
@@ -899,6 +936,9 @@ impl ControllerConnection {
         if let Some(writer) = &mut self.preference_writer {
             writer.finish().await;
         }
+        if let Some(writer) = &mut self.audio_preference_writer {
+            writer.finish().await;
+        }
         result
     }
 
@@ -908,6 +948,9 @@ impl ControllerConnection {
         }
         let result = flatten_signal_task((&mut self.signal_task).await);
         if let Some(writer) = &mut self.preference_writer {
+            writer.finish().await;
+        }
+        if let Some(writer) = &mut self.audio_preference_writer {
             writer.finish().await;
         }
         result
@@ -1086,5 +1129,7 @@ async fn resolve_connection_with_client(
         summary,
         assist: None,
         preferences: None,
+        audio_preferences: None,
+        target_platform: device.platform,
     })
 }

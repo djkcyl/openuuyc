@@ -121,6 +121,8 @@ pub(super) async fn resolve(
             room: None,
         }),
         preferences: None,
+        audio_preferences: None,
+        target_platform: 0,
     })
 }
 

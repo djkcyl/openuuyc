@@ -3,11 +3,14 @@ use egui::{Align, Color32, FontId, RichText, Sense, Stroke, vec2};
 
 use crate::media::FrameRateChoice;
 use crate::stream_control::{
-    AdaptiveBitrateSnapshot, BudgetPhase, MAX_CUSTOM_BITRATE_MBPS, StreamControlHandle,
+    AdaptiveBitrateSnapshot, BudgetPhase, MAX_CUSTOM_BITRATE_MBPS, MouseMode, StreamControlHandle,
     StreamControlSettings, StreamControlSnapshot, StreamQuality,
 };
 
 const WIDTH: f32 = 280.0;
+const ROW_HEIGHT: f32 = 28.0;
+const ROW_GAP: f32 = 2.0;
+const SECTION_GAP: f32 = 4.0;
 const TEXT: Color32 = Color32::from_rgb(222, 225, 231);
 const MUTED: Color32 = Color32::from_rgb(142, 150, 164);
 const ACCENT: Color32 = Color32::from_rgb(79, 139, 230);
@@ -20,6 +23,7 @@ enum Page {
     Quality,
     Custom,
     Adaptive,
+    Mouse,
 }
 
 impl Page {
@@ -28,6 +32,7 @@ impl Page {
             Self::Quality => "画质",
             Self::Custom => "自定义码率",
             Self::Adaptive => "自适应码率",
+            Self::Mouse => "鼠标模式",
         }
     }
 }
@@ -40,6 +45,11 @@ pub(super) struct StreamControlUi {
     settings: Option<StreamControlSettings>,
     dirty: bool,
     local_error: Option<String>,
+}
+
+pub(super) struct LocalViewSettings {
+    pub aspect_locked: bool,
+    pub performance_mode: super::PerformancePanelMode,
 }
 
 enum Action {
@@ -109,27 +119,33 @@ fn separator(ui: &mut egui::Ui) {
     );
 }
 
+fn section_separator(ui: &mut egui::Ui) {
+    ui.add_space(SECTION_GAP);
+    separator(ui);
+    ui.add_space(SECTION_GAP);
+}
+
 fn menu_row(
     ui: &mut egui::Ui,
     label: &str,
     detail: &str,
-    selected: bool,
+    selected: Option<bool>,
     enabled: bool,
     more: bool,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), 32.0),
+        vec2(ui.available_width(), ROW_HEIGHT),
         if enabled {
             Sense::click()
         } else {
             Sense::hover()
         },
     );
-    if selected || (response.hovered() && enabled) {
+    if selected == Some(true) || (response.hovered() && enabled) {
         ui.painter().rect_filled(
             rect,
             4.0,
-            if selected {
+            if selected == Some(true) {
                 Color32::from_rgb(31, 47, 67)
             } else {
                 HOVER
@@ -141,7 +157,7 @@ fn menu_row(
     } else {
         Color32::from_gray(89)
     };
-    if selected {
+    if selected == Some(true) {
         let origin = rect.left_center() + vec2(13.0, 0.0);
         let stroke = Stroke::new(1.5, ACCENT);
         ui.painter()
@@ -150,7 +166,7 @@ fn menu_row(
             .line_segment([origin + vec2(-0.5, 2.5), origin + vec2(4.5, -3.0)], stroke);
     }
     ui.painter().text(
-        rect.left_center() + vec2(28.0, 0.0),
+        rect.left_center() + vec2(if selected.is_some() { 28.0 } else { 10.0 }, 0.0),
         egui::Align2::LEFT_CENTER,
         label,
         FontId::proportional(13.0),
@@ -178,24 +194,36 @@ fn menu_row(
     response
 }
 
-fn switch(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
-    let (rect, mut response) = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::click());
-    if response.clicked() {
+fn switch_row(ui: &mut egui::Ui, label: &str, value: &mut bool) -> egui::Response {
+    let enabled = ui.is_enabled();
+    let (row, mut response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    if enabled && response.clicked() {
         *value = !*value;
         response.mark_changed();
     }
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
-            ui.is_enabled(),
-            *value,
-            "自动调整",
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
     });
+    if enabled && response.hovered() {
+        ui.painter().rect_filled(row, 4.0, HOVER);
+    }
+    ui.painter().text(
+        row.left_center() + vec2(10.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        if enabled {
+            TEXT
+        } else {
+            Color32::from_gray(89)
+        },
+    );
+    let rect = egui::Rect::from_center_size(row.right_center() - vec2(25.0, 0.0), vec2(34.0, 20.0));
     ui.painter().rect_filled(
         rect,
         10.0,
-        if *value {
+        if *value && enabled {
             ACCENT
         } else {
             Color32::from_rgb(65, 73, 86)
@@ -212,6 +240,172 @@ fn switch(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
     ui.painter()
         .circle_filled(center, 7.0, Color32::from_rgb(234, 237, 243));
     response
+}
+
+fn speaker_button(ui: &mut egui::Ui, volume: u8, muted: &mut bool) {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(ROW_HEIGHT, ROW_HEIGHT), Sense::click());
+    if response.clicked() {
+        *muted = !*muted;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *muted, "静音")
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 4.0, HOVER);
+    }
+    let stage = if *muted || volume == 0 {
+        0
+    } else if volume <= 33 {
+        1
+    } else if volume <= 66 {
+        2
+    } else {
+        3
+    };
+    let color = if stage == 0 { MUTED } else { TEXT };
+    let stroke = Stroke::new(1.3, color);
+    let center = rect.center();
+    ui.painter().add(egui::Shape::closed_line(
+        [
+            (-9.0, -3.0),
+            (-6.0, -3.0),
+            (-2.0, -7.0),
+            (-2.0, 7.0),
+            (-6.0, 3.0),
+            (-9.0, 3.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| center + vec2(x, y))
+        .collect(),
+        stroke,
+    ));
+    if stage == 0 {
+        ui.painter()
+            .line_segment([center + vec2(3.0, -3.0), center + vec2(9.0, 3.0)], stroke);
+        ui.painter()
+            .line_segment([center + vec2(3.0, 3.0), center + vec2(9.0, -3.0)], stroke);
+    } else {
+        for arc in 0..stage {
+            let radius = 6.0 + arc as f32 * 3.0;
+            let points = (0..=10)
+                .map(|step| {
+                    let angle = -0.8 + step as f32 * 0.16;
+                    center + vec2(-4.0 + radius * angle.cos(), radius * angle.sin())
+                })
+                .collect();
+            ui.painter().add(egui::Shape::line(points, stroke));
+        }
+    }
+    response.on_hover_text(if *muted { "取消静音" } else { "静音" });
+}
+
+#[derive(Clone, Copy)]
+struct VolumeMeterMotion {
+    levels: [f32; 2],
+    time: f64,
+}
+
+fn volume_bar(
+    ui: &mut egui::Ui,
+    volume: &mut u8,
+    muted: &mut bool,
+    audio: &crate::audio::AudioPlayback,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+        speaker_button(ui, *volume, muted);
+        ui.spacing_mut().slider_width = ui.available_width();
+        ui.spacing_mut().interact_size.y = ROW_HEIGHT;
+        let response = ui.add(
+            egui::Slider::new(volume, 0..=100)
+                .show_value(false)
+                .smart_aim(false)
+                .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.0 }),
+        );
+        let input = audio.input_levels().into_iter().fold(0.0_f32, f32::max);
+        let output = if *muted || *volume == 0 {
+            0.0
+        } else {
+            audio.output_levels().into_iter().fold(0.0_f32, f32::max)
+        };
+        let target = [input, output].map(|amplitude| {
+            if amplitude > 0.0 {
+                ((20.0 * amplitude.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        let now = ui.input(|input| input.time);
+        let levels = ui.ctx().data_mut(|data| {
+            let id = response.id.with("volume-meter-motion");
+            let mut motion = data
+                .get_temp::<VolumeMeterMotion>(id)
+                .unwrap_or(VolumeMeterMotion {
+                    levels: target,
+                    time: now,
+                });
+            let elapsed = now - motion.time;
+            if !(0.0..=0.5).contains(&elapsed) {
+                motion.levels = target;
+            } else {
+                for (shown, target) in motion.levels.iter_mut().zip(target) {
+                    // Display-only ballistics. Gain and the audio callback do
+                    // not wait for this visual attack/release.
+                    let tau = if target > *shown { 0.12 } else { 0.45 };
+                    *shown += (target - *shown) * (1.0 - (-elapsed / tau).exp()) as f32;
+                    if target == 0.0 && *shown < 0.002 {
+                        *shown = 0.0;
+                    }
+                }
+            }
+            if *muted || *volume == 0 {
+                motion.levels[1] = 0.0;
+            }
+            motion.time = now;
+            data.insert_temp(id, motion);
+            motion.levels
+        });
+        let rect = response.rect;
+        // Keep the full row as the hit target, but draw only a slim rail.
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_rgb(24, 28, 35));
+        let track = egui::Rect::from_center_size(rect.center(), vec2(rect.width(), 6.0));
+        ui.painter()
+            .rect_filled(track, 3.0, Color32::from_rgb(16, 20, 26));
+        for (level, color) in [
+            (levels[0], Color32::from_rgb(105, 115, 129)),
+            (levels[1], Color32::from_rgb(70, 171, 119)),
+        ] {
+            if level > 0.0 {
+                let fill = egui::Rect::from_min_max(
+                    track.min,
+                    egui::pos2(track.left() + track.width() * level, track.bottom()),
+                );
+                ui.painter()
+                    .with_clip_rect(fill.intersect(ui.clip_rect()))
+                    .rect_filled(track, 3.0, color);
+            }
+        }
+        let handle_x = (rect.left() + rect.width() * f32::from(*volume) / 100.0)
+            .clamp(rect.left() + 2.0, rect.right() - 2.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(egui::pos2(handle_x, rect.center().y), vec2(2.5, 14.0)),
+            1.0,
+            TEXT,
+        );
+        if response.hovered() || response.dragged() || response.has_focus() {
+            ui.painter().rect_stroke(
+                track,
+                3.0,
+                Stroke::new(1.0, ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response
+    })
+    .inner
 }
 
 fn bitrate_editor(ui: &mut egui::Ui, value: &mut u32, adaptive: bool, multi_screen: bool) -> bool {
@@ -373,9 +567,9 @@ fn menu_style(ui: &mut egui::Ui) {
     style
         .text_styles
         .insert(egui::TextStyle::Button, FontId::proportional(13.0));
-    style.spacing.item_spacing = vec2(6.0, 3.0);
-    style.spacing.button_padding = vec2(10.0, 5.0);
-    style.spacing.interact_size.y = 26.0;
+    style.spacing.item_spacing = vec2(6.0, ROW_GAP);
+    style.spacing.button_padding = vec2(10.0, 4.0);
+    style.spacing.interact_size.y = ROW_HEIGHT;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.selection.bg_fill = ACCENT;
     style.visuals.widgets.inactive.bg_fill = HOVER;
@@ -395,6 +589,7 @@ pub(super) fn show_stream_control_window(
     ctx: &egui::Context,
     handle: &StreamControlHandle,
     state: &mut StreamControlUi,
+    view: &mut LocalViewSettings,
 ) {
     let snapshot = handle.snapshot();
     let multi_screen = snapshot.screens.len() > 1;
@@ -441,7 +636,7 @@ pub(super) fn show_stream_control_window(
                 .fill(Color32::from_rgb(24, 28, 35))
                 .stroke(Stroke::new(1.0, LINE))
                 .corner_radius(6.0)
-                .inner_margin(egui::Margin::same(12)),
+                .inner_margin(egui::Margin::symmetric(12, 6)),
         )
         .show(ctx, |ui| {
             menu_style(ui);
@@ -461,7 +656,7 @@ pub(super) fn show_stream_control_window(
                     close = icon_button(ui, Icon::Close, "关闭").clicked();
                 });
             });
-            ui.add_space(8.0);
+            ui.add_space(SECTION_GAP);
             ui.scope(|ui| {
                 ui.set_width(WIDTH);
                 match state.page {
@@ -485,12 +680,13 @@ pub(super) fn show_stream_control_window(
                             let more =
                                 matches!(quality, StreamQuality::Custom | StreamQuality::Adaptive);
                             let enabled = snapshot.ready
+                                && !snapshot.cursor_pending
                                 && (!more || snapshot.protocol.supports_custom_bitrate());
                             let response = menu_row(
                                 ui,
                                 label,
                                 &detail,
-                                settings.quality == quality,
+                                Some(settings.quality == quality),
                                 enabled,
                                 more,
                             );
@@ -514,9 +710,7 @@ pub(super) fn show_stream_control_window(
                                 response.on_hover_text("此被控端不支持自定义码率");
                             }
                         }
-                        ui.add_space(11.0);
-                        separator(ui);
-                        ui.add_space(9.0);
+                        section_separator(ui);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("帧率").size(11.0).color(MUTED))
                                 .on_hover_text(
@@ -529,19 +723,19 @@ pub(super) fn show_stream_control_window(
                                 ui.label(RichText::new("FPS").size(10.0).color(MUTED));
                             });
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(ROW_GAP);
                         let choices = FrameRateChoice::available(snapshot.local_display)
                             .into_iter()
                             .filter(|choice| *choice != FrameRateChoice::Auto)
                             .collect::<Vec<_>>();
                         let width = (WIDTH - 6.0 * (choices.len().saturating_sub(1)) as f32)
                             / choices.len().max(1) as f32;
-                        ui.add_enabled_ui(snapshot.ready, |ui| {
+                        ui.add_enabled_ui(snapshot.ready && !snapshot.cursor_pending, |ui| {
                             ui.horizontal(|ui| {
                                 for choice in choices {
                                     if ui
                                         .add_sized(
-                                            [width, 30.0],
+                                            [width, ROW_HEIGHT],
                                             egui::Button::new(
                                                 choice.value(snapshot.local_display).to_string(),
                                             )
@@ -556,56 +750,81 @@ pub(super) fn show_stream_control_window(
                                 }
                             });
                         });
-                        ui.add_space(11.0);
-                        separator(ui);
-                        ui.add_space(9.0);
-                        ui.horizontal(|ui| {
-                            ui.label("强制中转");
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                let mut relay = snapshot.network.relay_enabled;
-                                let response = ui
-                                    .add_enabled_ui(snapshot.network.available, |ui| {
-                                        switch(ui, &mut relay)
-                                    })
-                                    .inner;
-                                if response.changed() {
-                                    state.local_error = handle
-                                        .set_relay_enabled(relay)
-                                        .err()
-                                        .map(|e| e.to_string());
+                        section_separator(ui);
+                        switch_row(ui, "按比例缩放", &mut view.aspect_locked)
+                            .on_hover_text("仅当前播放窗口");
+                        let mut monitoring =
+                            view.performance_mode != super::PerformancePanelMode::Hidden;
+                        if switch_row(ui, "性能监控", &mut monitoring)
+                            .on_hover_text("仅当前播放窗口；F3切换显示模式")
+                            .changed()
+                        {
+                            view.performance_mode = if monitoring {
+                                super::PerformancePanelMode::Compact
+                            } else {
+                                super::PerformancePanelMode::Hidden
+                            };
+                        }
+                        if monitoring {
+                            ui.horizontal(|ui| {
+                                for (mode, label) in [
+                                    (super::PerformancePanelMode::Compact, "简洁"),
+                                    (super::PerformancePanelMode::Detailed, "详细"),
+                                ] {
+                                    if ui
+                                        .add_sized(
+                                            [(WIDTH - 6.0) / 2.0, ROW_HEIGHT],
+                                            egui::Button::new(label)
+                                                .selected(view.performance_mode == mode),
+                                        )
+                                        .clicked()
+                                    {
+                                        view.performance_mode = mode;
+                                    }
                                 }
-                                response.on_hover_text(
-                                    snapshot.network.unavailable_reason.unwrap_or(
-                                        "仅本次连接生效；关闭后恢复自动选路，不保证一定直连",
-                                    ),
-                                );
                             });
-                        });
-                        ui.add_space(9.0);
-                        separator(ui);
-                        ui.add_space(9.0);
+                        }
+                        let mode_label = match snapshot.mouse_preference {
+                            MouseMode::Smart | MouseMode::View => "智能鼠标",
+                            MouseMode::Remote => "被控端鼠标",
+                            MouseMode::Local => "主控端鼠标",
+                        };
+                        if menu_row(ui, "鼠标模式", mode_label, None, true, true).clicked() {
+                            state.page = Page::Mouse;
+                        }
+                        let mut relay = snapshot.network.relay_enabled;
+                        let response = ui
+                            .add_enabled_ui(snapshot.network.available, |ui| {
+                                switch_row(ui, "强制中转", &mut relay)
+                            })
+                            .inner;
+                        if response.changed() {
+                            state.local_error =
+                                handle.set_relay_enabled(relay).err().map(|e| e.to_string());
+                        }
+                        response.on_hover_text(
+                            snapshot
+                                .network
+                                .unavailable_reason
+                                .unwrap_or("仅本次连接生效；关闭后恢复自动选路，不保证一定直连"),
+                        );
+                        section_separator(ui);
                         let audio = handle.audio();
                         let mut audio_settings = audio.settings();
                         let audio_status = audio.snapshot();
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut audio_settings.muted, "静音");
-                            ui.add(
-                                egui::Slider::new(&mut audio_settings.volume, 0..=100)
-                                    .suffix("%")
-                                    .show_value(true),
-                            )
-                            .on_hover_text(
-                                if audio_status.device.is_empty() {
-                                    if audio_status.receiving {
-                                        "Opus · 48 kHz · 双声道"
-                                    } else {
-                                        "尚未收到音频"
-                                    }
-                                } else {
-                                    &audio_status.device
-                                },
-                            );
-                        });
+                        volume_bar(
+                            ui,
+                            &mut audio_settings.volume,
+                            &mut audio_settings.muted,
+                            &audio,
+                        )
+                        .on_hover_text(
+                            if audio_status.device.is_empty() && !audio_status.receiving {
+                                "等待音频"
+                            } else {
+                                "音量"
+                            },
+                        );
                         audio.set_settings(audio_settings);
                         if let Some(error) = audio_status.error {
                             ui.horizontal_wrapped(|ui| {
@@ -624,6 +843,57 @@ pub(super) fn show_stream_control_window(
                             ui.label(RichText::new(notice).size(11.0).color(MUTED));
                         }
                     }
+                    Page::Mouse => {
+                        for (mode, label, description) in [
+                            (
+                                MouseMode::Smart,
+                                "智能鼠标",
+                                "根据远端光标和软件状态切换输入方式。",
+                            ),
+                            (
+                                MouseMode::Remote,
+                                "使用被控端鼠标",
+                                "更好的兼容性，光标随视频显示，受网络延迟影响。",
+                            ),
+                            (
+                                MouseMode::Local,
+                                "使用主控端鼠标",
+                                "本地光标即时响应，部分游戏或软件可能不兼容。",
+                            ),
+                        ] {
+                            if menu_row(
+                                ui,
+                                label,
+                                "",
+                                Some(snapshot.mouse_preference == mode),
+                                snapshot.ready
+                                    && !snapshot.mouse_pending
+                                    && snapshot.pending_count == 0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                state.local_error = handle
+                                    .set_mouse_mode(mode)
+                                    .err()
+                                    .map(|error| error.to_string());
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(description).size(11.0).color(MUTED),
+                                )
+                                .wrap(),
+                            );
+                            ui.add_space(7.0);
+                        }
+                        separator(ui);
+                        ui.add_space(7.0);
+                        ui.label(
+                            RichText::new("按 Ctrl+Shift+Alt+Z 退出控制。")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    }
                     Page::Custom | Page::Adaptive => {
                         let adaptive = state.page == Page::Adaptive;
                         ui.add_enabled_ui(snapshot.ready, |ui| {
@@ -637,28 +907,18 @@ pub(super) fn show_stream_control_window(
                                 ui.add_space(14.0);
                                 separator(ui);
                                 ui.add_space(9.0);
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label("自动调整");
-                                        ui.label(
-                                            RichText::new(if settings.stability_priority {
-                                                "网络拥堵时降低码率"
-                                            } else {
-                                                "仅提醒，不自动调整"
-                                            })
-                                            .size(11.0)
-                                            .color(MUTED),
-                                        );
-                                    });
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(Align::Center),
-                                        |ui| {
-                                            state.dirty |=
-                                                switch(ui, &mut settings.stability_priority)
-                                                    .changed();
-                                        },
-                                    );
-                                });
+                                state.dirty |=
+                                    switch_row(ui, "自动调整", &mut settings.stability_priority)
+                                        .changed();
+                                ui.label(
+                                    RichText::new(if settings.stability_priority {
+                                        "网络拥堵时降低码率"
+                                    } else {
+                                        "仅提醒，不自动调整"
+                                    })
+                                    .size(11.0)
+                                    .color(MUTED),
+                                );
                             }
                             ui.add_space(16.0);
                             let can_apply = state.dirty
@@ -705,8 +965,9 @@ pub(super) fn show_stream_control_window(
                 if let Some(error) = state
                     .local_error
                     .as_ref()
+                    .or(snapshot.mouse_error.as_ref())
+                    .or(snapshot.cursor_error.as_ref())
                     .or(snapshot.last_error.as_ref())
-                    .or(snapshot.persistence_error.as_ref())
                     .or(snapshot.network.error.as_ref())
                 {
                     ui.add_space(9.0);
@@ -715,6 +976,14 @@ pub(super) fn show_stream_control_window(
                             .size(11.0)
                             .color(super::bad_color()),
                     ))
+                    .on_hover_text(error);
+                } else if let Some(error) = snapshot.persistence_error.as_ref() {
+                    ui.add_space(9.0);
+                    ui.label(
+                        RichText::new("设置未保存")
+                            .size(11.0)
+                            .color(super::bad_color()),
+                    )
                     .on_hover_text(error);
                 } else if let Some(waiting) = snapshot.waiting_for {
                     ui.add_space(9.0);

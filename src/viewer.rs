@@ -25,6 +25,12 @@ mod screens;
 mod stream_menu;
 use stream_menu::{StreamControlUi, show_stream_control_window};
 
+#[cfg(target_os = "windows")]
+mod windows_cursor;
+#[cfg(target_os = "windows")]
+mod windows_keyboard;
+#[cfg(windows)]
+mod windows_mouse;
 #[cfg(windows)]
 mod windows_presenter;
 #[cfg(windows)]

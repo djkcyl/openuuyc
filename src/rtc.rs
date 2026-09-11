@@ -234,6 +234,11 @@ impl DataChannels {
             .find(|channel| channel.label() == "TEXT_DATA_CHANNEL")
             .expect("the official data-channel set always includes TEXT_DATA_CHANNEL")
             .clone();
+        workers.spawn(send_remote_input(
+            control_channel.clone(),
+            uu_kcp.clone(),
+            stream_control.mouse().clone(),
+        ));
         workers.spawn(send_official_control_messages(
             control_channel,
             text_channel,
@@ -472,6 +477,45 @@ async fn send_official_control_messages(
                 }
             }
         }
+    }
+}
+
+async fn send_remote_input(
+    channel: Arc<RTCDataChannel>,
+    kcp: UuKcpControl,
+    mouse: crate::remote_input::RemoteInput,
+) {
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut keyboard_submission_seen = false;
+    loop {
+        let event = tokio::select! {
+            event = mouse.next() => event,
+            _ = heartbeat.tick() => { mouse.heartbeat(); continue; }
+        };
+        if !mouse.is_current(&event) {
+            mouse.discard(&event);
+            continue;
+        }
+        let result = tokio::select! {
+            biased;
+            _ = mouse.epoch_cancelled(event.epoch) => Err(anyhow::anyhow!("鼠标连接代次已变更")),
+            result = tokio::time::timeout(Duration::from_secs(1),
+                send_control_message(&kcp, &channel, event.event.encode())) => result
+                .map_err(|_| anyhow::anyhow!("鼠标输入发送超时"))
+                .and_then(|result| result.map(|_| ())),
+        };
+        if let Err(error) = &result {
+            tracing::warn!(%error, "mouse input transport failed");
+        }
+        if !keyboard_submission_seen
+            && result.is_ok()
+            && matches!(event.event, crate::remote_input::InputEvent::Key { .. })
+        {
+            keyboard_submission_seen = true;
+            tracing::debug!("keyboard event submitted to CONTROL transport");
+        }
+        mouse.complete(&event, result);
     }
 }
 
@@ -2070,7 +2114,9 @@ impl NativePeer {
         }));
 
         let (connection_state_tx, connection_states) = mpsc::unbounded_channel();
+        let mouse_transport = data_channels.stream_control.clone();
         connection.on_peer_connection_state_change(Box::new(move |state| {
+            mouse_transport.set_mouse_transport_ready(state == RTCPeerConnectionState::Connected);
             let connection_state_tx = connection_state_tx.clone();
             // 18A25C/18B44F -> 18874E -> 149E08 -> 1DFE68. An initial
             // estimate exists even without outgoing media. Unknown/Connecting
@@ -2779,6 +2825,7 @@ impl NativePeer {
     }
 
     pub async fn close(&self) -> Result<()> {
+        self.data_channels.stream_control.mouse().close().await;
         self.data_channels.workers.close().await;
         self.data_channels.stream_control.audio().close().await;
         self.uu_kcp.close().await;
@@ -2791,6 +2838,7 @@ impl NativePeer {
 
 impl Drop for NativePeer {
     fn drop(&mut self) {
+        self.data_channels.stream_control.mouse().set_ready(false);
         // Normal paths await close(). This also retires application tasks on
         // an exceptional owner drop instead of leaving them to hold the peer.
         self.data_channels.workers.shutdown.cancel();

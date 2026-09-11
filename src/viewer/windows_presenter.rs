@@ -13,8 +13,8 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
@@ -31,6 +31,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{ResizeDirection, Window, WindowAttributes, WindowId};
 
@@ -100,10 +101,19 @@ fn ui_frame_interval(window: &Window) -> Duration {
 }
 
 fn run_player(config: ConnectingWindowsRunConfig, needs_display: bool) -> Result<()> {
-    let event_loop = EventLoop::<UiRepaintEvent>::with_user_event()
+    let mut builder = EventLoop::<UiRepaintEvent>::with_user_event();
+    let router = super::windows_mouse::router().clone();
+    builder.with_msg_hook(move |message| router.message(message));
+    let event_loop = builder
         .build()
         .context("create Windows connection/player event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    super::windows_keyboard::remove_unused_raw_keyboard()?;
+    let _keyboard_hook = super::windows_keyboard::KeyboardHook::install()
+        .map_err(
+            |error| tracing::warn!(%error, "keyboard hook unavailable; viewing remains available"),
+        )
+        .ok();
     let mut runner = ConnectingWindowsRunner {
         attributes: WindowAttributes::default()
             .with_title(format!("{}{}", crate::VIEWER_TITLE_PREFIX, config.alias))
@@ -224,7 +234,7 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
         event: WindowEvent,
     ) {
         if let Some(screens) = self.screens.as_mut() {
-            screens.window_event(window_id, &event);
+            screens.window_event(window_id, &event, event_loop);
             return;
         }
         let Some(window) = self.window.as_ref() else {
@@ -234,7 +244,8 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
             return;
         }
         if event == WindowEvent::CloseRequested {
-            if let Some(app) = self.playing.as_ref() {
+            if let Some(app) = self.playing.as_mut() {
+                app.mouse.release(window);
                 app.shutdown.store(true, Ordering::Release);
             }
             event_loop.exit();
@@ -264,7 +275,7 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
             self.last_ui_frame = Some(Instant::now());
         }
         let result = if let Some(app) = self.playing.as_mut() {
-            app.on_window_event(window, &event)
+            app.on_window_event(window, &event, event_loop)
         } else if let Some(app) = self.connecting.as_mut() {
             app.on_window_event(window, &event)
         } else {
@@ -317,7 +328,7 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
             || self
                 .playing
                 .as_ref()
-                .is_some_and(|app| app.shutdown.load(Ordering::Acquire))
+                .is_some_and(|app| app.close_requested || app.shutdown.load(Ordering::Acquire))
         {
             event_loop.exit();
         }
@@ -336,7 +347,14 @@ impl ApplicationHandler<UiRepaintEvent> for ConnectingWindowsRunner {
             screens.update(event_loop);
             return;
         }
-        if let Some(app) = self.playing.as_ref() {
+        if let Some(app) = self.playing.as_mut() {
+            if app.close_requested {
+                event_loop.exit();
+                return;
+            }
+            if let Some(window) = &self.window {
+                app.refresh_mouse(window, event_loop);
+            }
             if app.shutdown.load(Ordering::Acquire) {
                 if let Some(error) = mutex_lock(&app.fatal_error).clone() {
                     self.fatal_error = Some(error);
@@ -625,9 +643,8 @@ struct PlayerTitleBar<'a> {
     window: &'a Window,
     title: &'a str,
     performance: &'a PerformanceMonitor,
-    performance_mode: &'a mut PerformancePanelMode,
+    stream_control: &'a StreamControlHandle,
     stream_control_ui: &'a mut StreamControlUi,
-    aspect_locked: bool,
     move_state: Option<&'a mut WindowMoveState>,
 }
 
@@ -640,7 +657,7 @@ fn player_title_bar(ui: &mut egui::Ui, mut bar: PlayerTitleBar<'_>) -> PlayerChr
         egui::vec2(ui.available_width(), 36.0),
     );
     const WINDOW_CONTROLS_WIDTH: f32 = 106.0;
-    const VIEW_ACTIONS_WIDTH: f32 = 140.0;
+    const VIEW_ACTIONS_WIDTH: f32 = 110.0;
     let identity_width = (rect.width() * 0.22).clamp(170.0, 210.0);
     let controls_rect = egui::Rect::from_min_max(
         egui::pos2(rect.max.x - WINDOW_CONTROLS_WIDTH, rect.min.y),
@@ -753,16 +770,6 @@ fn player_title_bar(ui: &mut egui::Ui, mut bar: PlayerTitleBar<'_>) -> PlayerChr
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     actions.spacing_mut().item_spacing.x = 4.0;
-    if title_icon_button(
-        &mut actions,
-        TitleIcon::Performance,
-        !matches!(bar.performance_mode, PerformancePanelMode::Hidden),
-        "性能面板（F3）",
-    )
-    .clicked()
-    {
-        *bar.performance_mode = bar.performance_mode.next();
-    }
     let quality_button = title_icon_button(
         &mut actions,
         TitleIcon::Quality,
@@ -782,26 +789,46 @@ fn player_title_bar(ui: &mut egui::Ui, mut bar: PlayerTitleBar<'_>) -> PlayerChr
     if quality_button.clicked() {
         bar.stream_control_ui.open = !bar.stream_control_ui.open;
     }
-    if title_icon_button(
-        &mut actions,
-        TitleIcon::OneToOne,
-        false,
-        "按实际像素调整窗口",
-    )
-    .clicked()
-    {
-        action.one_to_one = true;
-    }
-    if title_icon_button(
-        &mut actions,
-        TitleIcon::Aspect,
-        bar.aspect_locked,
-        "锁定画面比例",
-    )
-    .clicked()
-    {
-        action.toggle_aspect = true;
-    }
+    action.one_to_one = actions
+        .add_enabled_ui(
+            !bar.window.is_maximized() && bar.window.fullscreen().is_none(),
+            |ui| {
+                title_icon_button(
+                    ui,
+                    TitleIcon::OneToOne,
+                    false,
+                    "1:1 实际像素（固定左上角，空间不足时等比缩小）",
+                )
+            },
+        )
+        .inner
+        .on_disabled_hover_text("请先还原窗口")
+        .clicked();
+    let control = bar.stream_control.snapshot();
+    let enabled =
+        control.mouse_mode != crate::remote_input::MouseMode::View || control.mouse_pending;
+    action.toggle_mouse = actions
+        .add_enabled_ui(
+            enabled || (control.ready && control.pending_count == 0),
+            |ui| {
+                title_icon_button(
+                    ui,
+                    TitleIcon::Mouse,
+                    enabled,
+                    if enabled {
+                        "退出控制（Ctrl+Shift+Alt+Z）"
+                    } else {
+                        if bar.stream_control.mouse().keyboard_supported() {
+                            "开启键鼠控制"
+                        } else {
+                            "开启鼠标控制（此平台暂未适配键盘）"
+                        }
+                    },
+                )
+            },
+        )
+        .inner
+        .clicked();
 
     let mut controls = ui.new_child(
         egui::UiBuilder::new()
@@ -825,16 +852,15 @@ fn player_title_bar(ui: &mut egui::Ui, mut bar: PlayerTitleBar<'_>) -> PlayerChr
 struct PlayerChromeAction {
     close: bool,
     one_to_one: bool,
-    toggle_aspect: bool,
+    toggle_mouse: bool,
     drag_window: bool,
 }
 
 #[derive(Clone, Copy)]
 enum TitleIcon {
-    Aspect,
     OneToOne,
+    Mouse,
     Quality,
-    Performance,
     Minimize,
     Maximize,
     Restore,
@@ -878,68 +904,42 @@ fn paint_title_icon(
     let center = rect.center();
     let stroke = egui::Stroke::new(1.35, color);
     match icon {
-        TitleIcon::Aspect => {
-            let frame = egui::Rect::from_center_size(center, egui::vec2(15.0, 10.0));
-            painter.rect_stroke(frame, 1.5, stroke, egui::StrokeKind::Inside);
-            painter.line_segment(
-                [
-                    frame.left_top() + egui::vec2(2.0, 4.0),
-                    frame.left_top() + egui::vec2(2.0, 2.0),
-                ],
+        TitleIcon::OneToOne => {
+            for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let corner = center + egui::vec2(x * 7.0, y * 6.0);
+                painter.line(
+                    vec![
+                        corner - egui::vec2(x * 4.0, 0.0),
+                        corner,
+                        corner - egui::vec2(0.0, y * 4.0),
+                    ],
+                    stroke,
+                );
+            }
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center, egui::vec2(3.0, 3.0)),
+                0.0,
                 stroke,
-            );
-            painter.line_segment(
-                [
-                    frame.left_top() + egui::vec2(2.0, 2.0),
-                    frame.left_top() + egui::vec2(4.0, 2.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    frame.right_bottom() - egui::vec2(2.0, 4.0),
-                    frame.right_bottom() - egui::vec2(2.0, 2.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    frame.right_bottom() - egui::vec2(2.0, 2.0),
-                    frame.right_bottom() - egui::vec2(4.0, 2.0),
-                ],
-                stroke,
+                egui::StrokeKind::Inside,
             );
         }
-        TitleIcon::OneToOne => {
-            let left = center.x - 7.0;
-            let right = center.x + 7.0;
-            let top = center.y - 6.0;
-            let bottom = center.y + 6.0;
-            for points in [
+        TitleIcon::Mouse => {
+            let body = egui::Rect::from_center_size(center, egui::vec2(11.0, 16.0));
+            painter.rect_stroke(body, 5.0, stroke, egui::StrokeKind::Inside);
+            painter.line_segment(
                 [
-                    egui::pos2(left, top + 4.0),
-                    egui::pos2(left, top),
-                    egui::pos2(left + 4.0, top),
+                    center + egui::vec2(0.0, -6.0),
+                    center + egui::vec2(0.0, -2.0),
                 ],
+                stroke,
+            );
+            painter.line_segment(
                 [
-                    egui::pos2(right - 4.0, top),
-                    egui::pos2(right, top),
-                    egui::pos2(right, top + 4.0),
+                    center + egui::vec2(-4.5, -1.0),
+                    center + egui::vec2(4.5, -1.0),
                 ],
-                [
-                    egui::pos2(left, bottom - 4.0),
-                    egui::pos2(left, bottom),
-                    egui::pos2(left + 4.0, bottom),
-                ],
-                [
-                    egui::pos2(right - 4.0, bottom),
-                    egui::pos2(right, bottom),
-                    egui::pos2(right, bottom - 4.0),
-                ],
-            ] {
-                painter.line(points.to_vec(), stroke);
-            }
-            painter.circle_filled(center, 1.3, color);
+                stroke,
+            );
         }
         TitleIcon::Quality => {
             for (offset, knob) in [(-5.0, -3.0), (0.0, 4.0), (5.0, -1.0)] {
@@ -951,19 +951,6 @@ fn paint_title_icon(
                     stroke,
                 );
                 painter.circle_filled(egui::pos2(center.x + knob, center.y + offset), 2.0, color);
-            }
-        }
-        TitleIcon::Performance => {
-            let bottom = center.y + 6.0;
-            for (x, height) in [(-6.0, 5.0), (-1.0, 9.0), (4.0, 13.0)] {
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(center.x + x, bottom - height),
-                        egui::pos2(center.x + x + 3.0, bottom),
-                    ),
-                    1.0,
-                    color,
-                );
             }
         }
         TitleIcon::Minimize => {
@@ -1025,6 +1012,9 @@ fn paint_device_mark(ui: &mut egui::Ui) {
 }
 
 fn handle_title_drag(window: &Window, response: &egui::Response) -> bool {
+    if window.fullscreen().is_some() {
+        return false;
+    }
     if response.double_clicked() {
         window.set_maximized(!window.is_maximized());
         false
@@ -1044,6 +1034,10 @@ fn update_nonmodal_window_move(
     response: &egui::Response,
     state: &mut WindowMoveState,
 ) {
+    if window.fullscreen().is_some() {
+        state.start = None;
+        return;
+    }
     if response.double_clicked() {
         state.start = None;
         let _ = unsafe { ReleaseCapture() };
@@ -1093,32 +1087,37 @@ fn update_nonmodal_window_move(
 }
 
 fn window_buttons(ui: &mut egui::Ui, window: &Window) -> bool {
+    let expanded = window.is_maximized() || window.fullscreen().is_some();
     let minimize = title_icon_button(ui, TitleIcon::Minimize, false, "最小化");
     if minimize.clicked() {
         window.set_minimized(true);
     }
     let maximize = title_icon_button(
         ui,
-        if window.is_maximized() {
+        if expanded {
             TitleIcon::Restore
         } else {
             TitleIcon::Maximize
         },
         false,
-        if window.is_maximized() {
-            "还原"
-        } else {
-            "最大化"
-        },
+        if expanded { "还原" } else { "最大化" },
     );
     if maximize.clicked() {
-        window.set_maximized(!window.is_maximized());
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+        } else {
+            window.set_maximized(!window.is_maximized());
+        }
     }
     title_icon_button(ui, TitleIcon::Close, false, "关闭").clicked()
 }
 
 pub(super) fn title_bar_height_pixels(window: &Window) -> u32 {
-    (42.0 * window.scale_factor()).round().max(1.0) as u32
+    if window.fullscreen().is_some() {
+        0
+    } else {
+        (42.0 * window.scale_factor()).round().max(1.0) as u32
+    }
 }
 
 fn configure_dwm_window(window: &Window) {
@@ -1126,8 +1125,17 @@ fn configure_dwm_window(window: &Window) {
         return;
     };
     let dark_mode = 1_i32;
-    let border_color = 0x008B654E_u32;
-    let corner = DWMWCP_ROUNDSMALL;
+    let fullscreen = window.fullscreen().is_some();
+    let border_color = if fullscreen {
+        DWMWA_COLOR_NONE
+    } else {
+        0x008B654E_u32
+    };
+    let corner = if fullscreen {
+        DWMWCP_DONOTROUND
+    } else {
+        DWMWCP_ROUNDSMALL
+    };
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -1173,7 +1181,12 @@ fn constrain_window_aspect(
     last_window_size: &mut PhysicalSize<u32>,
     pending_aspect_size: &mut Option<PhysicalSize<u32>>,
 ) {
-    if size.width == 0 || size.height == 0 || !aspect_locked || window.is_maximized() {
+    if size.width == 0
+        || size.height == 0
+        || !aspect_locked
+        || window.is_maximized()
+        || window.fullscreen().is_some()
+    {
         *last_window_size = size;
         return;
     }
@@ -1216,6 +1229,9 @@ fn fit_window_to_aspect(
     (video_width, video_height): (u32, u32),
     pending_aspect_size: &mut Option<PhysicalSize<u32>>,
 ) {
+    if window.is_maximized() || window.fullscreen().is_some() {
+        return;
+    }
     let current = window.inner_size();
     let title_height = title_bar_height_pixels(window);
     let mut desired = PhysicalSize::new(
@@ -1246,14 +1262,23 @@ fn resize_window_one_to_one(
     pending_aspect_size: &mut Option<PhysicalSize<u32>>,
 ) {
     let title_height = title_bar_height_pixels(window);
-    let work = monitor_work_area(window).unwrap_or(RECT {
-        left: 0,
-        top: 0,
-        right: i32::try_from(window.inner_size().width).unwrap_or(i32::MAX),
-        bottom: i32::try_from(window.inner_size().height).unwrap_or(i32::MAX),
-    });
-    let max_width = (work.right - work.left).max(1) as u32;
-    let max_height = (work.bottom - work.top).max(1) as u32;
+    let size = window.inner_size();
+    let (max_width, max_height) = match (monitor_work_area(window), window.outer_position()) {
+        (Some(work), Ok(origin)) => {
+            let outer = window.outer_size();
+            // Only grow to the right/bottom from the existing outer origin.
+            // Reserve non-client pixels as well; never move the window to fit.
+            (
+                (work.right.saturating_sub(origin.x).max(1) as u32)
+                    .saturating_sub(outer.width.saturating_sub(size.width))
+                    .max(1),
+                (work.bottom.saturating_sub(origin.y).max(1) as u32)
+                    .saturating_sub(outer.height.saturating_sub(size.height))
+                    .max(1),
+            )
+        }
+        _ => (size.width.max(1), size.height.max(1)),
+    };
     let max_content_height = max_height.saturating_sub(title_height).max(1);
     let scale = 1.0_f64
         .min(max_width as f64 / video_width.max(1) as f64)
@@ -1264,9 +1289,6 @@ fn resize_window_one_to_one(
     );
     *pending_aspect_size = Some(target);
     let _ = window.request_inner_size(target);
-    let left = work.left + ((work.right - work.left - target.width as i32).max(0) / 2);
-    let top = work.top + ((work.bottom - work.top - target.height as i32).max(0) / 2);
-    window.set_outer_position(PhysicalPosition::new(left, top));
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1413,7 +1435,7 @@ fn borderless_resize(
     window: &Window,
     mut manual: Option<(&mut WindowResizeState, Option<(u32, u32)>)>,
 ) -> Option<ResizeDirection> {
-    if window.is_maximized() {
+    if window.is_maximized() || window.fullscreen().is_some() {
         return None;
     }
     let rect = ui.max_rect();
@@ -1743,7 +1765,33 @@ fn render_thread_frame(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ViewerShortcut {
+    ReleaseMouse,
+    Fullscreen,
+    Close,
+}
+
+fn viewer_shortcut(
+    modifiers: winit::keyboard::ModifiersState,
+    key: winit::keyboard::PhysicalKey,
+) -> Option<ViewerShortcut> {
+    use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+    if modifiers != (ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT) {
+        return None;
+    }
+    match key {
+        PhysicalKey::Code(KeyCode::KeyZ) => Some(ViewerShortcut::ReleaseMouse),
+        PhysicalKey::Code(KeyCode::KeyF) => Some(ViewerShortcut::Fullscreen),
+        PhysicalKey::Code(KeyCode::KeyQ) => Some(ViewerShortcut::Close),
+        _ => None,
+    }
+}
+
 struct ThreadedWindowsApp {
+    modifiers: winit::keyboard::ModifiersState,
+    mouse: super::windows_mouse::WindowMouse,
+    last_mouse_mode: crate::remote_input::MouseMode,
     screen_tabs: ScreenTabBar,
     close_requested: bool,
     title: String,
@@ -1777,6 +1825,13 @@ impl ThreadedWindowsApp {
     ) -> Result<()> {
         // One composition target per HWND. Keep UI composition and the video
         // child window; retire the old swap chain before attaching a new track.
+        self.mouse.release(window);
+        self.mouse = super::windows_mouse::WindowMouse::new(
+            window,
+            &session.stream_control,
+            &self.egui_context,
+        );
+        self.last_mouse_mode = crate::remote_input::MouseMode::View;
         self.renderer.stop();
         self.performance.pause_presentation();
         let size = self.video_window.resize(window, window.inner_size())?;
@@ -1806,6 +1861,13 @@ impl ThreadedWindowsApp {
         let size = video_window.resize(window, window.inner_size())?;
         let renderer = RenderWorker::spawn(video_window.handle(), size, &session)?;
         Ok(Self {
+            mouse: super::windows_mouse::WindowMouse::new(
+                window,
+                &stream_control,
+                &connecting.egui_context,
+            ),
+            last_mouse_mode: crate::remote_input::MouseMode::View,
+            modifiers: winit::keyboard::ModifiersState::empty(),
             screen_tabs: ScreenTabBar::default(),
             close_requested: false,
             title,
@@ -1831,8 +1893,43 @@ impl ThreadedWindowsApp {
         })
     }
 
-    fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> Result<()> {
+    fn on_window_event(
+        &mut self,
+        window: &Window,
+        event: &WindowEvent,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<()> {
+        if let WindowEvent::ModifiersChanged(modifiers) = event {
+            self.modifiers = modifiers.state();
+        }
+        if let WindowEvent::KeyboardInput {
+            event: key,
+            is_synthetic: false,
+            ..
+        } = event
+            && window.has_focus()
+            && key.state == winit::event::ElementState::Pressed
+            && let Some(shortcut) = viewer_shortcut(self.modifiers, key.physical_key)
+        {
+            if !key.repeat {
+                self.apply_shortcut(window, shortcut)?;
+                window.request_redraw();
+                if !self.close_requested {
+                    self.refresh_mouse(window, event_loop);
+                }
+            }
+            return Ok(());
+        }
         let response = self.egui_winit.on_window_event(window, event);
+        if matches!(
+            event,
+            WindowEvent::Focused(false) | WindowEvent::Occluded(true)
+        ) {
+            self.mouse.release(window);
+        }
+        if matches!(event, WindowEvent::Focused(false)) {
+            self.modifiers = winit::keyboard::ModifiersState::empty();
+        }
         if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
             window.request_redraw();
         }
@@ -1848,14 +1945,100 @@ impl ThreadedWindowsApp {
             }
             _ => {}
         }
+        self.refresh_mouse(window, event_loop);
+        if let WindowEvent::MouseWheel { delta, .. } = event {
+            self.mouse.wheel(*delta);
+        }
         Ok(())
+    }
+
+    fn apply_shortcut(&mut self, window: &Window, shortcut: ViewerShortcut) -> Result<()> {
+        match shortcut {
+            ViewerShortcut::ReleaseMouse => {
+                self.mouse.release(window);
+                if let Err(error) = self
+                    .stream_control
+                    .set_mouse_mode(crate::remote_input::MouseMode::View)
+                {
+                    self.stream_control.mouse().fail(error.to_string());
+                }
+            }
+            ViewerShortcut::Fullscreen => {
+                self.pending_aspect_size = None;
+                self.window_move = WindowMoveState::default();
+                self.window_resize = WindowResizeState::default();
+                self.stream_control_ui.open = false;
+                let fullscreen = window
+                    .fullscreen()
+                    .is_none()
+                    .then(|| winit::window::Fullscreen::Borderless(window.current_monitor()));
+                window.set_fullscreen(fullscreen);
+                configure_dwm_window(window);
+                // A maximized window may keep the same outer size. Update
+                // the video origin even if no size-change event follows.
+                self.resize_targets(window, window.inner_size())?;
+            }
+            ViewerShortcut::Close => {
+                self.mouse.release(window);
+                self.close_requested = true;
+            }
+        }
+        window.request_redraw();
+        Ok(())
+    }
+
+    pub(super) fn refresh_mouse(&mut self, window: &Window, event_loop: &ActiveEventLoop) {
+        if let Ok(hwnd) = window_hwnd(window) {
+            super::windows_keyboard::finish_lock_releases(hwnd.0 as u64);
+        }
+        if let Ok(hwnd) = window_hwnd(window)
+            && let Some(shortcut) = super::windows_keyboard::take_shortcut(hwnd.0 as u64)
+            && window.has_focus()
+            && let Err(error) = self.apply_shortcut(window, shortcut)
+        {
+            self.stream_control.mouse().fail(error.to_string());
+        }
+        if self.close_requested {
+            self.mouse.release(window);
+            return;
+        }
+        let mode = self.stream_control.mouse().mode();
+        if self.last_mouse_mode != crate::remote_input::MouseMode::View
+            && mode == crate::remote_input::MouseMode::View
+            && self.stream_control.mouse().error().is_some()
+        {
+            let _ = self
+                .stream_control
+                .set_mouse_mode(crate::remote_input::MouseMode::View);
+        }
+        if self.last_mouse_mode != mode && mode != crate::remote_input::MouseMode::View {
+            self.stream_control_ui.open = false;
+            window.request_redraw();
+        }
+        self.last_mouse_mode = mode;
+        self.mouse.refresh(
+            window,
+            &self.egui_context,
+            &self.stream_control,
+            self._session.track_index,
+            &self.renderer.current_video_size,
+            self.stream_control_ui.open || self.screen_tabs.is_pending(),
+            event_loop,
+        );
     }
 
     fn draw_ui(&mut self, window: &Window) -> Result<()> {
         let started = Instant::now();
         let input = self.egui_winit.take_egui_input(window);
-        let mut performance_mode = self.performance_mode;
+        let mut view = super::stream_menu::LocalViewSettings {
+            performance_mode: self.performance_mode,
+            aspect_locked: self.aspect_locked,
+        };
         let mut chrome_action = PlayerChromeAction::default();
+        let fullscreen = window.fullscreen().is_some();
+        if fullscreen {
+            self.stream_control_ui.open = false;
+        }
         let mut resize = None;
         let resize_aspect = self
             .aspect_locked
@@ -1863,37 +2046,44 @@ impl ThreadedWindowsApp {
             .flatten();
         let output = self.egui_context.run_ui(input, |ui| {
             if ui.ctx().input(|input| input.key_pressed(egui::Key::F3)) {
-                performance_mode = performance_mode.next();
+                view.performance_mode = view.performance_mode.next();
             }
             let ctx = ui.ctx().clone();
-            resize = borderless_resize(ui, window, Some((&mut self.window_resize, resize_aspect)));
-            egui::Panel::top("viewer-toolbar")
-                .frame(title_bar_frame())
-                .show(ui, |ui| {
-                    chrome_action = player_title_bar(
-                        ui,
-                        PlayerTitleBar {
-                            screens: &mut self.screen_tabs,
-                            window,
-                            title: &self.title,
-                            performance: &self.performance,
-                            performance_mode: &mut performance_mode,
-                            stream_control_ui: &mut self.stream_control_ui,
-                            aspect_locked: self.aspect_locked,
-                            move_state: Some(&mut self.window_move),
-                        },
-                    );
-                });
-            show_stream_control_window(&ctx, &self.stream_control, &mut self.stream_control_ui);
+            if !fullscreen {
+                resize =
+                    borderless_resize(ui, window, Some((&mut self.window_resize, resize_aspect)));
+                egui::Panel::top("viewer-toolbar")
+                    .frame(title_bar_frame())
+                    .show(ui, |ui| {
+                        chrome_action = player_title_bar(
+                            ui,
+                            PlayerTitleBar {
+                                screens: &mut self.screen_tabs,
+                                window,
+                                title: &self.title,
+                                performance: &self.performance,
+                                stream_control: &self.stream_control,
+                                stream_control_ui: &mut self.stream_control_ui,
+                                move_state: Some(&mut self.window_move),
+                            },
+                        );
+                    });
+            }
+            show_stream_control_window(
+                &ctx,
+                &self.stream_control,
+                &mut self.stream_control_ui,
+                &mut view,
+            );
             super::show_performance_overlay(
                 &ctx,
                 &self.performance,
                 &self.stream_control.audio(),
-                performance_mode,
+                view.performance_mode,
                 "performance-grid-d3d11",
             );
         });
-        self.performance_mode = performance_mode;
+        self.performance_mode = view.performance_mode;
         let (renderer_output, platform_output, viewports) = egui_directx11::split_output(output);
         let immediate = viewports
             .get(&egui::ViewportId::ROOT)
@@ -1933,10 +2123,25 @@ impl ThreadedWindowsApp {
         }
         self.last_aspect_video_size = current_video_size;
         if chrome_action.close {
+            self.mouse.release(window);
             self.close_requested = true;
         }
-        if chrome_action.toggle_aspect {
-            self.aspect_locked = !self.aspect_locked;
+        if chrome_action.toggle_mouse {
+            let state = self.stream_control.snapshot();
+            let mode = if state.mouse_mode != crate::remote_input::MouseMode::View
+                || state.mouse_pending
+            {
+                self.mouse.release(window);
+                crate::remote_input::MouseMode::View
+            } else {
+                state.mouse_preference
+            };
+            if let Err(error) = self.stream_control.set_mouse_mode(mode) {
+                self.stream_control.mouse().fail(error.to_string());
+            }
+        }
+        if view.aspect_locked != self.aspect_locked {
+            self.aspect_locked = view.aspect_locked;
             if self.aspect_locked {
                 self.fit_window_to_current_aspect(window);
             }
@@ -3142,7 +3347,12 @@ fn validate_visible_geometry(
     Ok(())
 }
 
-fn fit_rect(video_width: u32, video_height: u32, output_width: u32, output_height: u32) -> RECT {
+pub(super) fn fit_rect(
+    video_width: u32,
+    video_height: u32,
+    output_width: u32,
+    output_height: u32,
+) -> RECT {
     let video_aspect = video_width as f64 / video_height.max(1) as f64;
     let output_aspect = output_width as f64 / output_height.max(1) as f64;
     let (width, height) = if video_aspect > output_aspect {
