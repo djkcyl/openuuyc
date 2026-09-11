@@ -88,6 +88,7 @@ impl NrdHttp {
             if method == Method::POST || method == Method::PUT {
                 request = request.body(body.clone());
             }
+            tracing::trace!(path, %method, endpoint, attempt, "sending NRD HTTPS request");
             let response = request.send().await;
             let outcome = match response {
                 Ok(response) => {

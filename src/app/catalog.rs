@@ -29,8 +29,10 @@ impl Catalog {
         client: Arc<AuthenticatedClient>,
         previous: Option<Self>,
         force: bool,
+        mut foreground: tokio::sync::watch::Receiver<bool>,
         progress: impl Fn(&Self),
     ) -> anyhow::Result<Self> {
+        foreground.wait_for(|focused| *focused).await?;
         let groups = client.device_groups().await?;
         crate::api::validate_device_id(&groups.current_device_id)?;
         let mut details = previous.map(|c| c.details).unwrap_or_default();
@@ -63,6 +65,9 @@ impl Catalog {
             if fresh {
                 continue;
             }
+            // Finish the current request on blur, but do not start more items
+            // in this batch until the control center has focus again.
+            foreground.wait_for(|focused| *focused).await?;
             let value = client
                 .device_detail(device.validated_device_id()?)
                 .await

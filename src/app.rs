@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::{DeviceInfo, DeviceList};
@@ -860,6 +860,17 @@ impl DeviceCenterApp {
 }
 
 impl crate::ui::App for DeviceCenterApp {
+    fn on_focus_changed(&mut self, focused: bool) {
+        self.worker.focus.send_if_modified(|current| {
+            if *current == focused {
+                return false;
+            }
+            *current = focused;
+            tracing::debug!(focused, "device center refresh focus changed");
+            true
+        });
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.drain_events(&ctx);
@@ -881,6 +892,7 @@ impl crate::ui::App for DeviceCenterApp {
 
 struct GuiWorker {
     commands: mpsc::UnboundedSender<GuiCommand>,
+    focus: watch::Sender<bool>,
     events: Receiver<GuiEvent>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -888,6 +900,7 @@ struct GuiWorker {
 impl GuiWorker {
     fn spawn(refresh_interval: Duration) -> Self {
         let (commands, command_receiver) = mpsc::unbounded_channel();
+        let (focus, foreground) = watch::channel(false);
         let (event_sender, events) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             let runtime = match tokio::runtime::Runtime::new() {
@@ -902,10 +915,12 @@ impl GuiWorker {
                 refresh_interval,
                 command_receiver,
                 event_sender,
+                foreground,
             ));
         });
         Self {
             commands,
+            focus,
             events,
             thread: Some(thread),
         }
@@ -1037,6 +1052,7 @@ async fn gui_worker_loop(
     refresh_interval: Duration,
     mut commands: mpsc::UnboundedReceiver<GuiCommand>,
     events: Sender<GuiEvent>,
+    mut foreground: watch::Receiver<bool>,
 ) {
     let device_runtime = match crate::device_session::DeviceRuntime::start() {
         Ok(runtime) => runtime,
@@ -1081,6 +1097,10 @@ async fn gui_worker_loop(
             command = commands.recv() => match command {
                 Some(command) => Some(command),
                 None => break,
+            },
+            changed = foreground.changed() => {
+                if changed.is_err() { break; }
+                None
             },
             _ = tick.tick() => None,
         };
@@ -1646,7 +1666,9 @@ async fn gui_worker_loop(
             }
         }
         if let Some(active_client) = &client {
-            if assist_lists_task.is_none()
+            let refresh_active = *foreground.borrow();
+            if refresh_active
+                && assist_lists_task.is_none()
                 && Instant::now() >= next_assist_refresh
                 && logout_task.is_none()
                 && (assist_operation_task.is_none() || assist_operation_is_query)
@@ -1659,27 +1681,33 @@ async fn gui_worker_loop(
                 }));
                 next_assist_refresh = Instant::now() + Duration::from_secs(30);
             }
-            if catalog_task.is_none() && Instant::now() >= next_catalog {
+            if refresh_active && catalog_task.is_none() && Instant::now() >= next_catalog {
                 let client = Arc::clone(active_client);
                 let previous = catalog_cache.clone();
                 let force = std::mem::take(&mut force_catalog);
                 let progress = events.clone();
                 let generation = catalog_generation;
+                let foreground = foreground.clone();
                 catalog_task = Some(tokio::spawn(async move {
-                    let result =
-                        catalog::Catalog::load(Arc::clone(&client), previous, force, |catalog| {
+                    let result = catalog::Catalog::load(
+                        Arc::clone(&client),
+                        previous,
+                        force,
+                        foreground,
+                        |catalog| {
                             let _ = progress.send(GuiEvent::Catalog(
                                 generation,
                                 Ok(catalog.clone()),
                                 client.account_name(),
                             ));
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     (result, client.account_name())
                 }));
                 next_catalog = Instant::now() + Duration::from_secs(30);
             }
-            if api_task.is_none() && Instant::now() >= next_refresh {
+            if refresh_active && api_task.is_none() && Instant::now() >= next_refresh {
                 let client = Arc::clone(active_client);
                 let _ = events.send(GuiEvent::Working("正在刷新设备状态".into()));
                 api_task = Some(tokio::spawn(async move {

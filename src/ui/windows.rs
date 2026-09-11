@@ -144,6 +144,7 @@ impl Runner {
         state
             .window
             .set_visible(self.config.viewport.visible.unwrap_or(true));
+        state.app.0.on_focus_changed(state.window.has_focus());
         Ok(())
     }
 }
@@ -242,6 +243,11 @@ impl ApplicationHandler<Repaint> for Runner {
         };
         let response = state.input.on_window_event(&state.window, &event);
         let result = match event {
+            WindowEvent::Focused(focused) => {
+                state.app.0.on_focus_changed(focused);
+                state.schedule(Instant::now());
+                Ok(())
+            }
             WindowEvent::CloseRequested => {
                 state.close_requested = true;
                 state.render()
