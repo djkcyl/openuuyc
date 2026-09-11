@@ -1,5 +1,5 @@
 //! Typed keyboard/mouse events on UU CONTROL, independent of GUI frame cadence.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use anyhow::{Result, bail};
@@ -103,6 +103,9 @@ struct State {
     remote_held: [bool; 5],
     keys: BTreeMap<u16, Option<u8>>,
     remote_keys: BTreeMap<u16, Option<u8>>,
+    // Transport acceptance of UP is not acknowledgement of host injection.
+    // Keep keys retired at an ownership boundary for session reconciliation.
+    release_checkpoint: BTreeSet<u16>,
     keyboard_generation: u64,
     keyboard_platform: i32,
     queue: VecDeque<InputEvent>,
@@ -233,8 +236,14 @@ impl RemoteInput {
         s.owner == Some(owner) && s.held.iter().any(|held| *held)
     }
 
+    pub fn owner_holds_key(&self, owner: u64, key: u16) -> bool {
+        let s = self.lock();
+        s.owner == Some(owner) && s.keys.contains_key(&key)
+    }
+
     pub fn set_ready(&self, ready: bool) {
         let mut s = self.lock();
+        let became_ready = ready && !s.ready && !s.stopping;
         if !ready {
             s.epoch = s.epoch.wrapping_add(1);
             s.mode = MouseMode::View;
@@ -251,6 +260,9 @@ impl RemoteInput {
         }
         s.ready = ready && !s.stopping;
         drop(s);
+        if became_ready {
+            self.reconcile_keyboard_releases();
+        }
         self.wake.notify_one();
         self.drained.notify_waiters();
         self.epoch_changed.notify_waiters();
@@ -278,14 +290,15 @@ impl RemoteInput {
         // already given to transport. Never replay an obsolete click on resume.
         s.queue.clear();
         s.keyboard_generation = s.keyboard_generation.wrapping_add(1);
+        s.release_checkpoint.extend(s.remote_keys.keys().copied());
         // Release ordinary keys before modifiers; never synthesize new downs.
         for modifier in [false, true] {
-            for (&key, &lock) in &s.remote_keys {
+            for &key in s.remote_keys.keys() {
                 if matches!(key, 16..=18 | 91..=92 | 160..=165) == modifier {
                     s.queue.push_back(InputEvent::Key {
                         key,
                         down: false,
-                        lock,
+                        lock: None,
                         interrupt: false,
                     });
                 }
@@ -310,6 +323,26 @@ impl RemoteInput {
             return;
         }
         Self::release_locked(&mut s);
+        drop(s);
+        self.wake.notify_one();
+    }
+
+    /// Reconcile release-only state across an OS input-desktop transition.
+    /// This also covers Focused(false) retiring keys before WTS_SESSION_LOCK.
+    /// Never replay a press or restore a stale Caps/Num/Scroll lock preference.
+    pub fn reconcile_keyboard_releases(&self) {
+        let mut s = self.lock();
+        let retired = std::mem::take(&mut s.release_checkpoint);
+        if s.ready {
+            for key in retired {
+                if !s.queue.iter().any(|event| matches!(event, InputEvent::Key { key: queued, down: false, .. } if *queued == key)) {
+                    s.remote_keys.entry(key).or_insert(None);
+                    s.queue.push_back(InputEvent::Key { key, down: false, lock: None, interrupt: false });
+                }
+            }
+        } else {
+            s.release_checkpoint = retired;
+        }
         drop(s);
         self.wake.notify_one();
     }
@@ -459,6 +492,7 @@ impl RemoteInput {
                     } = event
                     {
                         s.remote_keys.insert(key, lock);
+                        s.release_checkpoint.remove(&key);
                     }
                     return QueuedInputEvent {
                         epoch: s.epoch,

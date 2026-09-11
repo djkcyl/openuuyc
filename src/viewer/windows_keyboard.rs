@@ -1,4 +1,5 @@
 //! Foreground keyboard routing. The hook never waits for transport or logs keys.
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread::JoinHandle;
 
@@ -16,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::remote_input::{MouseMode, RemoteInput};
 
 /// Winit registers mouse AND keyboard raw devices at event-loop creation.
-/// This client uses only RAWMOUSE; physical keyboard input uses the LL hook.
+/// This client uses only RAWMOUSE; keyboard uses window messages and a narrow hook.
 /// Remove just the unused keyboard class before showing/focusing a window.
 pub(super) fn remove_unused_raw_keyboard() -> Result<()> {
     use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_REMOVE, RegisterRawInputDevices};
@@ -38,6 +39,30 @@ struct Target {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Local,
+    Window(u64),
+    Hook(u64),
+}
+
+#[derive(Clone, Copy)]
+struct KeyEdge {
+    key: u16,
+    scan: u32,
+    down: bool,
+    injected: bool,
+}
+
+struct PendingKey {
+    edge: KeyEdge,
+    route: Route,
+    owner: u64,
+    ready: bool,
+}
+
+const MAX_PENDING_KEYS: usize = 512;
+
 struct Router {
     installed: bool,
     shortcut: Option<(u64, super::windows_presenter::ViewerShortcut)>,
@@ -47,6 +72,11 @@ struct Router {
     consumed: [bool; 256],
     lock_releases: Vec<(u64, u16, u64)>,
     diagnostic_seen: u64,
+    observed: [bool; 256],
+    routes: [Route; 256],
+    legacy_owned: [Option<u64>; 256],
+    pending: VecDeque<PendingKey>,
+    windows: BTreeMap<u64, crate::stream_control::StreamControlHandle>,
 }
 
 impl Default for Router {
@@ -60,6 +90,11 @@ impl Default for Router {
             consumed: [false; 256],
             lock_releases: Vec::new(),
             diagnostic_seen: 0,
+            observed: [false; 256],
+            routes: [Route::Local; 256],
+            legacy_owned: [None; 256],
+            pending: VecDeque::new(),
+            windows: BTreeMap::new(),
         }
     }
 }
@@ -80,6 +115,141 @@ fn blocked_modifiers(blocked: &[bool; 256]) -> bool {
     [91, 92, 160, 161, 162, 163, 164, 165]
         .into_iter()
         .any(|key| blocked[key])
+}
+
+fn intercept_key(key: u16, scan: u32, held: &[bool; 256]) -> bool {
+    let ctrl = held[162] || held[163];
+    let shift = held[160] || held[161];
+    let alt = held[164] || held[165];
+    let win = held[91] || held[92];
+    matches!(key, 91 | 92)
+        || win
+        || (alt && matches!(key, 9 | 27))
+        || (ctrl && key == 27)
+        || (ctrl && shift && alt && matches!(scan, 0x2c | 0x21 | 0x10))
+}
+
+pub(super) struct SessionNotifications {
+    owner: u64,
+    registered: bool,
+}
+
+impl SessionNotifications {
+    pub fn new(owner: u64, control: &crate::stream_control::StreamControlHandle) -> Self {
+        use windows::Win32::System::RemoteDesktop::{
+            NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+        };
+        with_router(|r| {
+            r.windows.insert(owner, control.clone());
+        });
+        let registered =
+            unsafe { WTSRegisterSessionNotification(HWND(owner as _), NOTIFY_FOR_THIS_SESSION) }
+                .map_err(|error| tracing::warn!(%error, "session lock notification unavailable"))
+                .is_ok();
+        Self { owner, registered }
+    }
+}
+
+impl Drop for SessionNotifications {
+    fn drop(&mut self) {
+        if self.registered {
+            let _ = unsafe {
+                windows::Win32::System::RemoteDesktop::WTSUnRegisterSessionNotification(HWND(
+                    self.owner as _,
+                ))
+            };
+        }
+        with_router(|r| {
+            r.windows.remove(&self.owner);
+        });
+    }
+}
+
+fn normalize_key(key: u32, scan: u32, extended: bool) -> u16 {
+    match key {
+        16 => {
+            if scan == 0x36 {
+                161
+            } else {
+                160
+            }
+        }
+        17 => {
+            if extended {
+                163
+            } else {
+                162
+            }
+        }
+        18 => {
+            if extended {
+                165
+            } else {
+                164
+            }
+        }
+        _ => key as u16,
+    }
+}
+
+/// Before TranslateMessage/winit/egui, on the window thread, not a render tick.
+pub(super) fn message(pointer: *const std::ffi::c_void) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    let msg = unsafe { &*pointer.cast::<MSG>() };
+    let key_message = matches!(
+        msg.message,
+        WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP
+    );
+    with_router(|r| {
+        if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE
+            && matches!(msg.wParam.0, 2 | 4 | 6 | 7) // console/remote disconnect, logoff, lock
+            && r.windows.contains_key(&(msg.hwnd.0 as u64))
+        {
+            r.suspend_desktop();
+            return false;
+        }
+        if !key_message {
+            r.drain_keys();
+            return false;
+        }
+        if !(8..=254).contains(&msg.wParam.0) || msg.wParam.0 == 231 {
+            return false;
+        }
+        let flags = msg.lParam.0 as u32;
+        let scan = (flags >> 16) & 0xff;
+        let virtual_key = if msg.wParam.0 == 229 {
+            // The local IME may replace wParam with VK_PROCESSKEY. Preserve
+            // the original physical key; committed text is not forwarded.
+            unsafe { windows::Win32::UI::Input::Ime::ImmGetVirtualKey(msg.hwnd) }
+        } else {
+            msg.wParam.0 as u32
+        };
+        if !(8..=254).contains(&virtual_key) || virtual_key == 231 {
+            return false;
+        }
+        let key = normalize_key(virtual_key, scan, flags & (1 << 24) != 0);
+        let down = matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let count = if down { (flags & 0xffff).max(1) } else { 1 };
+        if count > MAX_PENDING_KEYS as u32 {
+            r.stop_ordering();
+            return true;
+        }
+        let mut consumed = false;
+        for _ in 0..count {
+            consumed |= r.window_edge(
+                msg.hwnd.0 as u64,
+                KeyEdge {
+                    key,
+                    scan,
+                    down,
+                    injected: false,
+                },
+            );
+        }
+        consumed
+    })
 }
 
 pub(super) struct KeyboardHook {
@@ -177,6 +347,25 @@ impl Drop for KeyboardHook {
 }
 
 impl Router {
+    fn suspend_desktop(&mut self) {
+        // This is a control revocation, not a synthetic remote lock command.
+        // Release obligations already handed to transport remain in its queue.
+        for control in self.windows.values() {
+            let state = control.snapshot();
+            if state.mouse_mode != MouseMode::View || state.mouse_pending {
+                let _ = control.set_mouse_mode(MouseMode::View);
+            }
+            control.mouse().reconcile_keyboard_releases();
+        }
+        self.clear();
+        self.physical = [false; 256];
+        self.observed = [false; 256];
+        self.blocked = [false; 256];
+        self.consumed = [false; 256];
+        self.routes = [Route::Local; 256];
+        self.legacy_owned = [None; 256];
+        tracing::debug!("local desktop transition revoked remote input");
+    }
     // One observation per stage/source/activation. Never record keys or text.
     fn diagnostic(&mut self, stage: u8, injected: bool, reason: &'static str) {
         if self.target.is_none() {
@@ -191,12 +380,171 @@ impl Router {
     fn clear(&mut self) {
         self.shortcut = None;
         self.lock_releases.clear();
+        self.pending.clear();
         if let Some(target) = self.target.take() {
             target.input.pause_owner(target.owner);
         }
         for (blocked, down) in self.blocked.iter_mut().zip(self.physical) {
             *blocked |= down;
         }
+    }
+
+    fn stop_ordering(&mut self) {
+        if let Some(target) = &self.target {
+            target
+                .input
+                .fail("键盘事件顺序中断，已停止控制并释放按键".into());
+        }
+        self.clear();
+    }
+
+    fn push_edge(&mut self, edge: KeyEdge, route: Route) {
+        if self.pending.len() >= MAX_PENDING_KEYS {
+            self.stop_ordering();
+            return;
+        }
+        self.pending.push_back(PendingKey {
+            edge,
+            route,
+            owner: match route {
+                Route::Window(owner) | Route::Hook(owner) => owner,
+                Route::Local => self.target.as_ref().map_or(0, |t| t.owner),
+            },
+            ready: matches!(route, Route::Hook(_)),
+        });
+    }
+
+    fn drain_keys(&mut self) {
+        while self.pending.front().is_some_and(|key| key.ready) {
+            let key = self.pending.pop_front().unwrap();
+            let edge = key.edge;
+            if key.route == Route::Local {
+                let i = usize::from(edge.key);
+                self.physical[i] = edge.down;
+                self.blocked[i] = edge.down;
+                if !edge.down {
+                    self.consumed[i] = false;
+                }
+            } else {
+                self.event(edge.key, edge.scan, edge.down, edge.injected);
+            }
+        }
+    }
+
+    fn observe_hook(&mut self, edge: KeyEdge) -> bool {
+        let i = usize::from(edge.key);
+        let was_down = self.observed[i];
+        self.observed[i] = edge.down;
+        if edge.down && !was_down {
+            let owner = self
+                .target
+                .as_ref()
+                .filter(|t| {
+                    self.installed
+                        && unsafe { GetForegroundWindow() } == HWND(t.owner as _)
+                        && t.input.mode() != MouseMode::View
+                        && super::windows_mouse::router().keyboard_allowed(t.owner)
+                })
+                .map(|t| t.owner);
+            self.routes[i] = if let Some(owner) = owner {
+                if intercept_key(edge.key, edge.scan, &self.observed) {
+                    Route::Hook(owner)
+                } else {
+                    Route::Window(owner)
+                }
+            } else {
+                Route::Local
+            };
+        }
+        let route = self.routes[i];
+        if !edge.down {
+            self.routes[i] = Route::Local;
+        }
+        match route {
+            Route::Local => {
+                // No remote ownership; keep release/quarantine bookkeeping up
+                // to date without synthesizing a remote event.
+                if self
+                    .target
+                    .as_ref()
+                    .is_some_and(|t| unsafe { GetForegroundWindow() } == HWND(t.owner as _))
+                {
+                    self.push_edge(edge, route);
+                } else if !edge.down {
+                    self.physical[i] = false;
+                    self.blocked[i] = false;
+                    self.consumed[i] = false;
+                }
+                false
+            }
+            Route::Window(owner) | Route::Hook(owner) => {
+                if matches!(route, Route::Window(_)) && edge.down {
+                    self.legacy_owned[i] = Some(owner);
+                }
+                if self.target.as_ref().is_some_and(|t| t.owner == owner) {
+                    self.push_edge(edge, route);
+                    if matches!(route, Route::Hook(_)) {
+                        super::windows_mouse::router().wake_keyboard(owner);
+                    }
+                } else if !edge.down {
+                    self.physical[i] = false;
+                    self.blocked[i] = false;
+                    self.consumed[i] = false;
+                }
+                matches!(route, Route::Hook(_))
+            }
+        }
+    }
+
+    fn window_edge(&mut self, owner: u64, edge: KeyEdge) -> bool {
+        let i = usize::from(edge.key);
+        let position = self.pending.iter().position(|p| {
+            p.owner == owner
+                && !matches!(p.route, Route::Hook(_))
+                && !p.ready
+                && p.edge.key == edge.key
+                && p.edge.down == edge.down
+        });
+        let mut owned = self.legacy_owned[i] == Some(owner);
+        if let Some(position) = position {
+            // A missing earlier window event cannot be bypassed by a later
+            // intercepted key. Stop safely instead of replaying stale presses.
+            if self.pending.iter().take(position).any(|p| !p.ready) {
+                self.stop_ordering();
+            } else {
+                let injected = self.pending[position].edge.injected;
+                self.pending[position].edge = KeyEdge { injected, ..edge };
+                self.pending[position].ready = true;
+                owned = matches!(self.pending[position].route, Route::Window(_));
+                self.drain_keys();
+            }
+        } else if self.target.as_ref().is_some_and(|t| t.owner == owner) {
+            // Window input continues to work even if the hook wasn't called.
+            // No timer-based duplicate detection or duplicate fallback sends.
+            if self.pending.iter().any(|p| !p.ready) {
+                self.stop_ordering();
+            } else {
+                self.drain_keys();
+                owned |= self.event(edge.key, edge.scan, edge.down, edge.injected);
+                if edge.down
+                    && self
+                        .target
+                        .as_ref()
+                        .is_some_and(|t| t.input.owner_holds_key(owner, edge.key))
+                {
+                    self.routes[i] = Route::Window(owner);
+                    self.observed[i] = true;
+                    self.legacy_owned[i] = Some(owner);
+                } else if !edge.down && self.routes[i] == Route::Window(owner) {
+                    self.routes[i] = Route::Local;
+                    self.observed[i] = false;
+                }
+            }
+        }
+        if !edge.down {
+            self.legacy_owned[i] = None;
+        }
+        owned && !matches!(edge.key, 16..=18 | 20 | 144..=145 | 160..=165)
     }
 
     fn modifiers(&self) -> (bool, bool, bool, bool) {
@@ -210,7 +558,7 @@ impl Router {
     }
 
     fn event(&mut self, vk: u16, scan: u32, down: bool, injected: bool) -> bool {
-        self.diagnostic(0, injected, "hook_received");
+        self.diagnostic(0, injected, "window_dispatch_received");
         let index = usize::from(vk);
         // VK_PACKET is committed Unicode input, not a physical VK event.
         if !(8..=254).contains(&vk) || vk == 231 {
@@ -229,8 +577,7 @@ impl Router {
             }
             return was_consumed;
         };
-        if !self.installed
-            || unsafe { GetForegroundWindow() } != HWND(target.owner as _)
+        if unsafe { GetForegroundWindow() } != HWND(target.owner as _)
             || target.input.mode() == MouseMode::View
         {
             self.diagnostic(2, injected, "inactive_owner");
@@ -338,11 +685,6 @@ pub(super) fn set_target(owner: u64, input: &RemoteInput) {
             r.clear();
             return;
         }
-        if !r.installed {
-            r.clear();
-            input.fail("键盘钩子不可用，控制已停止".into());
-            return;
-        }
         if r.target.as_ref().is_some_and(|t| t.owner == owner) {
             return;
         }
@@ -353,6 +695,7 @@ pub(super) fn set_target(owner: u64, input: &RemoteInput) {
             r.physical[i] = r.consumed[i]
                 || (!matches!(i, 16..=18) && unsafe { GetAsyncKeyState(i as i32) } < 0);
             r.blocked[i] = r.physical[i];
+            r.observed[i] = r.physical[i];
         }
         tracing::debug!(
             quarantined_keys = r.blocked.iter().filter(|key| **key).count(),
@@ -381,30 +724,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM
         let down = matches!(message.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
         if down || matches!(message.0 as u32, WM_KEYUP | WM_SYSKEYUP) {
             let event = unsafe { &*(data.0 as *const KBDLLHOOKSTRUCT) };
-            let vk = match event.vkCode {
-                16 => {
-                    if event.scanCode == 0x36 {
-                        161
-                    } else {
-                        160
-                    }
-                }
-                17 => {
-                    if event.flags.0 & 1 != 0 {
-                        163
-                    } else {
-                        162
-                    }
-                }
-                18 => {
-                    if event.flags.0 & 1 != 0 {
-                        165
-                    } else {
-                        164
-                    }
-                }
-                key => key,
-            };
+            let vk = u32::from(normalize_key(
+                event.vkCode,
+                event.scanCode,
+                event.flags.0 & 1 != 0,
+            ));
             let scan = if event.scanCode == 0 {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{
                     MAPVK_VK_TO_VSC, MapVirtualKeyW,
@@ -413,8 +737,16 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM
             } else {
                 event.scanCode
             };
-            if vk < 256
-                && with_router(|r| r.event(vk as u16, scan, down, event.flags.0 & 0x10 != 0))
+            if (8..=254).contains(&vk)
+                && vk != 231
+                && with_router(|r| {
+                    r.observe_hook(KeyEdge {
+                        key: vk as u16,
+                        scan,
+                        down,
+                        injected: event.flags.0 & 0x10 != 0,
+                    })
+                })
             {
                 return LRESULT(1);
             }
@@ -460,6 +792,24 @@ pub(super) fn finish_lock_releases(owner: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_modifier_normalization_matches_native_scan_mapping() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VSC_TO_VK_EX, MapVirtualKeyW};
+        for (generic, scan, extended) in [
+            (16, 0x2a, false),
+            (16, 0x36, false),
+            (17, 0x1d, false),
+            (17, 0x1d, true),
+            (18, 0x38, false),
+            (18, 0x38, true),
+        ] {
+            let native = unsafe {
+                MapVirtualKeyW(scan | if extended { 0xe000 } else { 0 }, MAPVK_VSC_TO_VK_EX)
+            };
+            assert_eq!(u32::from(normalize_key(generic, scan, extended)), native);
+        }
+    }
 
     #[test]
     fn windows_remove_raw_keyboard_preserves_mouse_registration() {

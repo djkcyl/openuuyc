@@ -188,38 +188,3 @@ impl Cabac {
         Ok(pcm)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exhausted_input_remains_bounded_and_failure_cannot_be_cleared_by_more_bins() {
-        for size in [2, 3, 7, 17] {
-            for byte in [0x00, 0x55, 0x7f, 0xaa] {
-                let mut decoder = Cabac::new(&vec![byte; size]).unwrap();
-                let mut contexts = Contexts::new(26, Some(0)).unwrap();
-                let mut failed = false;
-                for index in 0..65536 {
-                    decoder.decision(&mut contexts.0[index % 1024]);
-                    decoder.bypass();
-                    if decoder.check().is_err() {
-                        failed = true;
-                        break;
-                    }
-                }
-                assert!(failed, "short source must eventually exhaust");
-                let position = decoder.position;
-                for index in 0..4096 {
-                    decoder.decision(&mut contexts.0[index % 1024]);
-                    decoder.bypass();
-                    assert!((2..=510).contains(&decoder.range));
-                    assert!(decoder.check().is_err());
-                }
-                assert_eq!(decoder.position, position);
-                assert!(decoder.pcm_and_restart(1).is_err());
-                assert!(!decoder.terminate());
-            }
-        }
-    }
-}

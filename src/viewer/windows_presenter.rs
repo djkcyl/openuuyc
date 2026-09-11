@@ -103,7 +103,9 @@ fn ui_frame_interval(window: &Window) -> Duration {
 fn run_player(config: ConnectingWindowsRunConfig, needs_display: bool) -> Result<()> {
     let mut builder = EventLoop::<UiRepaintEvent>::with_user_event();
     let router = super::windows_mouse::router().clone();
-    builder.with_msg_hook(move |message| router.message(message));
+    builder.with_msg_hook(move |message| {
+        super::windows_keyboard::message(message) || router.message(message)
+    });
     let event_loop = builder
         .build()
         .context("create Windows connection/player event loop")?;

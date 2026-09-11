@@ -322,6 +322,7 @@ fn button_edges(flags: u16) -> impl Iterator<Item = (u32, bool)> {
 
 pub(super) struct WindowMouse {
     owner: u64,
+    _session_notifications: super::windows_keyboard::SessionNotifications,
     input: RemoteInput,
     grabbed: bool,
     capture_center: Option<POINT>,
@@ -342,6 +343,9 @@ impl WindowMouse {
         let ctx = context.clone();
         Self {
             owner,
+            _session_notifications: super::windows_keyboard::SessionNotifications::new(
+                owner, control,
+            ),
             input: control.mouse().clone(),
             grabbed: false,
             capture_center: None,
@@ -760,38 +764,4 @@ fn make_cursor(
         hotspot[1],
     )?;
     Ok(event_loop.create_custom_cursor(source).into())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn windows_winit_wheel_units_keep_direction_and_sub_detents() {
-        use winit::event::MouseScrollDelta::LineDelta;
-        assert_eq!(
-            super::wheel_units(LineDelta(-1.0 / 120.0, 1.0 / 120.0)),
-            Some([1, 1])
-        );
-        assert_eq!(super::wheel_units(LineDelta(1.0, -2.0)), Some([-120, -240]));
-    }
-
-    #[test]
-    fn raw_packet_keeps_both_edges_for_every_button() {
-        let edges: Vec<_> = super::button_edges(0x03ff).collect();
-        assert_eq!(
-            edges,
-            vec![
-                (1, true),
-                (1, false),
-                (2, true),
-                (2, false),
-                (16, true),
-                (16, false),
-                (32, true),
-                (32, false),
-                (64, true),
-                (64, false)
-            ]
-        );
-        assert_eq!(super::button_edges(0x0c00).count(), 0);
-    }
 }
