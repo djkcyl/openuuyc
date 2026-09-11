@@ -1,43 +1,40 @@
 use super::*;
-use crate::logging::live::{Reader, Request};
+use crate::logging::live::Capacity;
 use std::{collections::VecDeque, time::Instant};
 
-const MAX_LINES: usize = 5000;
-const MAX_BYTES: usize = 2 * 1024 * 1024;
-
 pub(super) struct LiveView {
-    reader: Option<Reader>,
-    waiting: bool,
+    cursor: u64,
+    clear_pending: bool,
+    capacity: Capacity,
+    draft_capacity: Capacity,
+    capacity_loaded: bool,
     next_poll: Instant,
-    lines: VecDeque<String>,
-    bytes: usize,
+    lines: VecDeque<(u64, std::sync::Arc<str>)>,
     paused: bool,
     follow: bool,
     wrap: bool,
     wrapped: WrappedLogs,
     search: String,
     level: Level,
-    clear: bool,
-    discard_batch: bool,
     error: Option<String>,
 }
 
 impl Default for LiveView {
     fn default() -> Self {
         Self {
-            reader: None,
-            waiting: false,
+            cursor: 0,
+            clear_pending: false,
+            capacity: Capacity::default(),
+            draft_capacity: Capacity::default(),
+            capacity_loaded: false,
             next_poll: Instant::now(),
             lines: VecDeque::new(),
-            bytes: 0,
             paused: false,
             follow: true,
             wrap: true,
             wrapped: WrappedLogs::default(),
             search: String::new(),
             level: Level::Debug,
-            clear: false,
-            discard_batch: false,
             error: None,
         }
     }
@@ -56,36 +53,32 @@ fn line_level(line: &str) -> Option<Level> {
 }
 
 impl LiveView {
-    pub(super) fn show(&mut self, ui: &mut egui::Ui, snapshot: &logging::Snapshot) {
-        if self.reader.is_none() && self.error.is_none() {
-            match Reader::start() {
-                Ok(reader) => self.reader = Some(reader),
-                Err(e) => self.error = Some(format!("启动日志查看失败：{e}")),
-            }
-        }
-        // Pausing holds the displayed content; at most one bounded batch is pending.
+    pub(super) fn show(&mut self, ui: &mut egui::Ui) {
         if !self.paused
-            && let Some(reader) = &self.reader
-            && let Ok(batch) = reader.batches.try_recv()
+            && Instant::now() >= self.next_poll
+            && let Some(batch) = logging::live_read(if self.clear_pending {
+                u64::MAX
+            } else {
+                self.cursor
+            })
         {
-            self.waiting = false;
-            if !self.discard_batch {
-                self.error = batch.error;
-                if !batch.lines.is_empty() {
-                    self.wrapped.rows.clear();
-                }
-                for line in batch.lines {
-                    self.bytes += line.len();
-                    self.lines.push_back(line);
-                }
+            if !self.capacity_loaded || self.draft_capacity == self.capacity {
+                self.draft_capacity = batch.capacity;
+                self.capacity_loaded = true;
+            }
+            self.capacity = batch.capacity;
+            self.error = batch.error;
+            self.cursor = batch.cursor;
+            self.clear_pending = false;
+            if !batch.lines.is_empty() || self.lines.iter().any(|line| line.0 < batch.first) {
+                self.wrapped.rows.clear();
+                self.lines.retain(|line| line.0 >= batch.first);
+                self.lines.extend(batch.lines);
                 self.lines
                     .make_contiguous()
-                    .sort_by_cached_key(|line| logging::live::timestamp(line));
-                while self.lines.len() > MAX_LINES || self.bytes > MAX_BYTES {
-                    self.bytes -= self.lines.pop_front().unwrap().len();
-                }
+                    .sort_by_cached_key(|line| logging::live::timestamp(&line.1));
             }
-            self.discard_batch = false;
+            self.next_poll = Instant::now() + Duration::from_millis(250);
         }
         ui.horizontal(|ui| {
             if ui
@@ -99,9 +92,11 @@ impl LiveView {
             if ui.button("清空").on_hover_text("仅清空显示").clicked() {
                 self.lines.clear();
                 self.wrapped.rows.clear();
-                self.bytes = 0;
-                self.clear = true;
-                self.discard_batch = self.waiting;
+                self.clear_pending = true;
+                if let Some(batch) = logging::live_read(u64::MAX) {
+                    self.cursor = batch.cursor;
+                    self.clear_pending = false;
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -119,10 +114,44 @@ impl LiveView {
                     .desired_width((ui.available_width() - 72.0).max(100.0)),
             );
         });
+        ui.horizontal(|ui| {
+            ui.label("缓冲区");
+            ui.add(
+                egui::DragValue::new(&mut self.draft_capacity.lines)
+                    .range(100..=100_000)
+                    .speed(100)
+                    .suffix(" 条"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut self.draft_capacity.mib)
+                    .range(1..=64)
+                    .suffix(" MiB"),
+            );
+            if ui
+                .add_enabled(
+                    self.draft_capacity != self.capacity,
+                    egui::Button::new("保存"),
+                )
+                .clicked()
+            {
+                match logging::set_live_capacity(self.draft_capacity) {
+                    Ok(()) => {
+                        self.capacity = self.draft_capacity;
+                        self.error = None;
+                        if let Some(batch) = logging::live_read(u64::MAX) {
+                            self.lines.retain(|line| line.0 >= batch.first);
+                            self.wrapped.rows.clear();
+                        }
+                    }
+                    Err(error) => self.error = Some(format!("{error:#}")),
+                }
+            }
+        });
         let search = self.search.to_lowercase();
         let filtered: Vec<_> = self
             .lines
             .iter()
+            .map(|(_, line)| line.as_ref())
             .filter(|line| {
                 (self.level == Level::Trace
                     || line_level(line).is_some_and(|actual| actual <= self.level))
@@ -139,56 +168,21 @@ impl LiveView {
                 .add_enabled(!filtered.is_empty(), egui::Button::new("复制"))
                 .clicked()
             {
-                ui.ctx().copy_text(
-                    filtered
-                        .iter()
-                        .map(|line| line.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
+                ui.ctx().copy_text(filtered.join("\n"));
             }
         });
         if let Some(error) = &self.error {
             ui.label(RichText::new(error).color(RED));
         }
         ui.separator();
-        if self.wrap {
-            self.wrapped
-                .show(ui, &filtered, &self.search, self.level, self.follow);
-        } else {
-            let height = ui.text_style_height(&egui::TextStyle::Monospace);
-            egui::ScrollArea::both()
-                .id_salt("live-log-content")
-                .auto_shrink([false, false])
-                .stick_to_bottom(self.follow)
-                .show_rows(ui, height, filtered.len(), |ui, range| {
-                    for index in range {
-                        let line = filtered[index];
-                        let color = log_color(ui, line);
-                        ui.add(
-                            egui::Label::new(RichText::new(line.as_str()).monospace().color(color))
-                                .extend(),
-                        );
-                    }
-                });
-        }
-        if !self.paused
-            && !self.waiting
-            && Instant::now() >= self.next_poll
-            && let Some(reader) = &self.reader
-        {
-            let request = Request {
-                directory: snapshot.directory.clone(),
-                session: snapshot.session.clone(),
-                explicit_file: (!snapshot.managed).then(|| snapshot.file.clone()),
-                clear: self.clear,
-            };
-            if reader.requests.try_send(request).is_ok() {
-                self.waiting = true;
-                self.clear = false;
-                self.next_poll = Instant::now() + Duration::from_millis(250);
-            }
-        }
+        self.wrapped.show(
+            ui,
+            &filtered,
+            &self.search,
+            self.level,
+            self.follow,
+            self.wrap,
+        );
         if !self.paused {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
@@ -219,17 +213,22 @@ impl WrappedLogs {
     fn show(
         &mut self,
         ui: &mut egui::Ui,
-        lines: &[&String],
+        lines: &[&str],
         search: &str,
         level: Level,
         follow: bool,
+        wrap: bool,
     ) {
-        egui::ScrollArea::vertical()
-            .id_salt("live-log-wrapped")
+        egui::ScrollArea::new([!wrap, true])
+            .id_salt(("live-log-wrapped", wrap))
             .auto_shrink([false, false])
             .stick_to_bottom(follow)
             .show_viewport(ui, |ui, viewport| {
-                let width = ui.available_width().max(1.0);
+                let width = if wrap {
+                    ui.available_width().max(1.0)
+                } else {
+                    f32::INFINITY
+                };
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 let scale = ui.ctx().pixels_per_point();
                 if self.rows.len() != lines.len()
@@ -249,7 +248,7 @@ impl WrappedLogs {
                     for line in lines {
                         let galley = ui.fonts_mut(|fonts| {
                             fonts.layout(
-                                (*line).clone(),
+                                (*line).to_owned(),
                                 font.clone(),
                                 egui::Color32::PLACEHOLDER,
                                 width,
@@ -261,7 +260,15 @@ impl WrappedLogs {
                     }
                 }
                 // Keep wrapping bounded to the visible viewport, including very long records.
-                ui.set_min_size(vec2(width, self.height));
+                let content_width = if wrap {
+                    width
+                } else {
+                    self.rows
+                        .iter()
+                        .map(|(galley, _)| galley.size().x)
+                        .fold(0.0_f32, f32::max)
+                };
+                ui.set_min_size(vec2(content_width, self.height));
                 let origin = ui.min_rect().min;
                 let start = self
                     .rows

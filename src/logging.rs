@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tracing_appender::non_blocking::{ErrorCounter, WorkerGuard};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 mod files;
 pub mod live;
 pub use files::{MAX_FILE_MIB, MAX_TOTAL_MIB, RETENTION_DAYS};
@@ -154,12 +154,15 @@ struct Runtime {
     explicit_file: Option<PathBuf>,
     files: Arc<Mutex<files::Status>>,
     dropped: ErrorCounter,
+    live: live::View,
 }
 static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
 pub struct LoggingGuard {
     stop: mpsc::Sender<()>,
     watcher: Option<JoinHandle<()>>,
     _file_guard: WorkerGuard,
+    _live_guard: WorkerGuard,
+    _collector: Option<live::CollectorGuard>,
 }
 impl Drop for LoggingGuard {
     fn drop(&mut self) {
@@ -215,6 +218,11 @@ pub fn configure_child(command: &mut std::process::Command) {
     if let Some(r) = RUNTIME.get() {
         command.env("OPENUUYC_LOG_SESSION", &r.session);
         command.env("OPENUUYC_LOG_STEM", &r.stem);
+        if !r.live.endpoint.is_empty() {
+            command.env("OPENUUYC_LIVE_LOG_ENDPOINT", &r.live.endpoint);
+        } else {
+            command.env_remove("OPENUUYC_LIVE_LOG_ENDPOINT");
+        }
         let state = r.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(filter) = &state.override_filter {
             command.arg("--log-level").arg(filter);
@@ -223,6 +231,16 @@ pub fn configure_child(command: &mut std::process::Command) {
             command.arg("--log-file").arg(path);
         }
     }
+}
+pub fn live_read(after: u64) -> Option<live::Batch> {
+    RUNTIME.get()?.live.read(after)
+}
+pub fn set_live_capacity(capacity: live::Capacity) -> Result<()> {
+    RUNTIME
+        .get()
+        .context("日志系统尚未初始化")?
+        .live
+        .set_capacity(capacity)
 }
 pub fn open_directory() -> Result<()> {
     files::open_directory(&RUNTIME.get().context("日志系统尚未初始化")?.directory)
@@ -316,8 +334,15 @@ pub fn init(level: Option<&str>, path: Option<&Path>) -> Result<LoggingGuard> {
         .finish(sink);
     let dropped = writer.error_counter();
     let (filter_layer, filter) = tracing_subscriber::reload::Layer::new(filter);
+    let capture = live::start(config.parent().unwrap())
+        .unwrap_or_else(|error| live::unavailable(config.parent().unwrap(), error));
+    let capture_available = !capture.view.endpoint.is_empty();
+    let (live_writer, live_guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(512)
+        .lossy(true)
+        .thread_name("live-log-writer")
+        .finish(capture.writer);
     tracing_subscriber::registry()
-        .with(filter_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(writer)
@@ -327,7 +352,25 @@ pub fn init(level: Option<&str>, path: Option<&Path>) -> Result<LoggingGuard> {
                         .with_target(true)
                         .with_thread_ids(true),
                     session.clone(),
-                )),
+                ))
+                .with_filter(filter_layer),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || live::BoundedWriter(live_writer.clone()))
+                .with_ansi(false)
+                .event_format(ProcessEventFormat(
+                    tracing_subscriber::fmt::format()
+                        .with_target(true)
+                        .with_thread_ids(true),
+                    session.clone(),
+                ))
+                .with_filter(
+                    tracing_subscriber::filter::dynamic_filter_fn(move |_, _| {
+                        capture_available && live::capture_enabled()
+                    })
+                    .with_max_level_hint(tracing::level_filters::LevelFilter::TRACE),
+                ),
         )
         .try_init()
         .context("初始化日志系统")?;
@@ -346,6 +389,7 @@ pub fn init(level: Option<&str>, path: Option<&Path>) -> Result<LoggingGuard> {
         explicit_file,
         files,
         dropped,
+        live: capture.view,
     });
     RUNTIME
         .set(runtime.clone())
@@ -383,6 +427,8 @@ pub fn init(level: Option<&str>, path: Option<&Path>) -> Result<LoggingGuard> {
         stop,
         watcher: Some(watcher),
         _file_guard: guard,
+        _live_guard: live_guard,
+        _collector: capture.guard,
     })
 }
 struct ProcessEventFormat(tracing_subscriber::fmt::format::Format, String);

@@ -616,12 +616,7 @@ fn connection_title_bar(ui: &mut egui::Ui, window: &Window, alias: &str) -> bool
                 egui::vec2(available, 34.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.label(
-                        egui::RichText::new("UU")
-                            .size(13.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(96, 156, 255)),
-                    );
+                    paint_brand_logo(ui);
                     ui.label(
                         egui::RichText::new(format!("正在连接  {alias}"))
                             .size(12.0)
@@ -710,7 +705,7 @@ fn player_title_bar(ui: &mut egui::Ui, mut bar: PlayerTitleBar<'_>) -> PlayerChr
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     identity.set_clip_rect(identity_rect);
-    paint_device_mark(&mut identity);
+    paint_brand_logo(&mut identity);
     identity.add(
         egui::Label::new(
             egui::RichText::new(bar.title.trim_start_matches(crate::VIEWER_TITLE_PREFIX))
@@ -998,19 +993,19 @@ fn paint_title_icon(
     }
 }
 
-fn paint_device_mark(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::hover());
-    let center = rect.center();
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(center.x, center.y - 4.5),
-            egui::pos2(center.x + 4.5, center.y),
-            egui::pos2(center.x, center.y + 4.5),
-            egui::pos2(center.x - 4.5, center.y),
-        ],
-        egui::Color32::from_rgb(76, 143, 255),
-        egui::Stroke::NONE,
-    ));
+fn paint_brand_logo(ui: &mut egui::Ui) {
+    let key = egui::Id::new("viewer-brand-logo");
+    let texture = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(key))
+        .unwrap_or_else(|| {
+            let texture = crate::ui::branding::load_texture(ui.ctx());
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(key, texture.clone()));
+            texture
+        });
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+    crate::ui::branding::paint(ui.painter(), rect, &texture);
 }
 
 fn handle_title_drag(window: &Window, response: &egui::Response) -> bool {

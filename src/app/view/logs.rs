@@ -58,7 +58,7 @@ impl DeviceCenterApp {
         });
         ui.add_space(8.0);
         if state.live_tab {
-            state.live.show(ui, &snapshot);
+            logging::live::displaying(|| state.live.show(ui));
             return;
         }
         ui.horizontal(|ui| {
