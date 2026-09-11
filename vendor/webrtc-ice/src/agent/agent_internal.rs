@@ -424,7 +424,7 @@ impl AgentInternal {
         }
 
         log::debug!(
-            "Started agent: isControlling? {is_controlling}, remoteUfrag: {remote_ufrag}, remotePwd: {remote_pwd}"
+            "Started agent: isControlling? {is_controlling}"
         );
         self.set_remote_credentials(remote_ufrag, remote_pwd)
             .await?;

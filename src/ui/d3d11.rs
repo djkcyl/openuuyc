@@ -209,9 +209,13 @@ pub(crate) struct UiTimingAudit {
 }
 
 impl UiTimingAudit {
-    pub(crate) fn enabled() -> Option<Self> {
-        tracing::enabled!(target: "openuuyc::ui_timing", tracing::Level::DEBUG)
-            .then(|| Self::new(Instant::now()))
+    pub(crate) fn active(slot: &mut Option<Self>, at: Instant) -> Option<&mut Self> {
+        if tracing::enabled!(target: "openuuyc::ui_timing", tracing::Level::DEBUG) {
+            Some(slot.get_or_insert_with(|| Self::new(at)))
+        } else {
+            *slot = None;
+            None
+        }
     }
 
     fn new(since: Instant) -> Self {

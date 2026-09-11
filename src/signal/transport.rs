@@ -464,7 +464,7 @@ impl Worker {
                                     }
                                 }
                                 EnginePacket::Message(SocketPacket::Ack { id, .. }) => {
-                                    tracing::trace!(?packet, "received signaling packet");
+                                    tracing::trace!(id, "received signaling ACK");
                                     self.pending_acks.remove(&id);
                                     let _ = self.packets.send(Ok(packet));
                                 }
@@ -499,9 +499,7 @@ impl Worker {
         packet: EnginePacket,
         writer: &mpsc::UnboundedSender<Vec<Message>>,
     ) -> Option<SignalFailure> {
-        // Control-plane diagnostics only; video RTP never travels here. Keep
-        // complete event/ACK shape available when trace logging is requested.
-        tracing::trace!(?packet, "received signaling packet");
+        // Event payloads and ACKs can contain credentials; record metadata only.
         if let EnginePacket::Message(SocketPacket::Event {
             namespace,
             id,
@@ -510,6 +508,12 @@ impl Worker {
             ..
         }) = &packet
         {
+            tracing::trace!(
+                event,
+                ?id,
+                argument_count = args.len(),
+                "received signaling event"
+            );
             if namespace != "/" {
                 return None;
             }
@@ -517,7 +521,7 @@ impl Worker {
             // -> B60D00 -> B5F880 -> B5FEC0 -> ControlledCallback+40.
             // streamer_push is a different, higher-level session event.
             if matches!(event.as_str(), "bmsg_push" | "streamer_push") {
-                tracing::debug!(?self.role, event, ?id, payload = ?args.first(), "received signaling push event");
+                tracing::debug!(?self.role, event, ?id, argument_count = args.len(), "received signaling push event");
             }
             if self.role == SignalRole::Host
                 && event == "bmsg_push"

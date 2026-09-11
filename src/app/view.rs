@@ -3,6 +3,7 @@ use super::*;
 use egui::{Align, Color32, FontId, RichText, Sense, Stroke, vec2};
 mod about;
 mod assist;
+mod logs;
 
 const BG: Color32 = Color32::from_rgb(22, 26, 33);
 const SIDEBAR: Color32 = Color32::from_rgb(16, 20, 26);
@@ -29,6 +30,7 @@ enum Page {
     Favorites,
     Management,
     Settings,
+    Logs,
     About,
 }
 impl Page {
@@ -39,6 +41,7 @@ impl Page {
             Self::Favorites => "收藏设备",
             Self::Management => "全部设备",
             Self::Settings => "连接设置",
+            Self::Logs => "日志设置",
             Self::About => "关于",
         }
     }
@@ -52,6 +55,7 @@ pub(super) struct CenterUi {
     details_open: bool,
     edit: Option<DeviceEdit>,
     legal_document: Option<about::LegalDocument>,
+    logs: logs::LogUi,
 }
 
 struct DeviceEdit {
@@ -87,6 +91,7 @@ enum Icon {
     Star,
     Edit,
     Logout,
+    Logs,
 }
 
 pub(super) fn configure_visuals(ctx: &egui::Context) {
@@ -139,6 +144,17 @@ fn paint_icon(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
     let q = |x, y| c + vec2(x, y);
     let s = Stroke::new(1.5, color);
     match icon {
+        Icon::Logs => {
+            p.rect_stroke(
+                egui::Rect::from_center_size(c, vec2(15.0, 19.0)),
+                2.0,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            for y in [-5.0, 0.0, 5.0] {
+                p.line_segment([q(-4.0, y), q(4.0, y)], s);
+            }
+        }
         Icon::Assist => {
             p.circle_stroke(q(-4.0, -5.0), 3.0, s);
             p.circle_stroke(q(6.0, -3.0), 2.5, s);
@@ -301,7 +317,7 @@ fn nav_item(
     count: Option<usize>,
     selected: bool,
 ) -> bool {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     if selected || response.hovered() {
         ui.painter().rect_filled(
             rect,
@@ -700,6 +716,17 @@ impl DeviceCenterApp {
 
     pub(super) fn draw_center(&mut self, ui: &mut egui::Ui) {
         if self.needs_login() {
+            if self.center_ui.page == Page::Logs {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(BG).inner_margin(24))
+                    .show(ui, |ui| {
+                        if ui.link("返回登录").clicked() {
+                            self.center_ui.page = Page::Mine;
+                        }
+                        self.logs_page(ui);
+                    });
+                return;
+            }
             if self.login_restoring {
                 self.loading_page(ui);
             } else {
@@ -717,6 +744,8 @@ impl DeviceCenterApp {
             .show(ui, |ui| {
                 if self.center_ui.page == Page::Settings {
                     self.settings_page(ui);
+                } else if self.center_ui.page == Page::Logs {
+                    self.logs_page(ui);
                 } else if self.center_ui.page == Page::About {
                     self.about_page(ui);
                 } else if self.center_ui.page == Page::Management {
@@ -739,6 +768,7 @@ impl DeviceCenterApp {
                     .inner_margin(egui::Margin::symmetric(12, 20)),
             )
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
                 let (row, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
                 let response = response
@@ -772,7 +802,7 @@ impl DeviceCenterApp {
                     title,
                     title_color,
                 );
-                ui.add_space(28.0);
+                ui.add_space(24.0);
                 let count = self
                     .devices
                     .as_ref()
@@ -801,7 +831,7 @@ impl DeviceCenterApp {
                 ) {
                     self.center_ui.page = Page::Management;
                 }
-                ui.add_space(18.0);
+                ui.add_space(14.0);
                 ui.label(RichText::new("远程协助").small().color(MUTED));
                 if nav_item(
                     ui,
@@ -823,9 +853,9 @@ impl DeviceCenterApp {
                     self.center_ui.page = Page::Favorites;
                     self.request_assist_refresh();
                 }
-                ui.add_space(18.0);
+                ui.add_space(14.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 if nav_item(
                     ui,
                     Icon::Settings,
@@ -834,6 +864,15 @@ impl DeviceCenterApp {
                     self.center_ui.page == Page::Settings,
                 ) {
                     self.center_ui.page = Page::Settings;
+                }
+                if nav_item(
+                    ui,
+                    Icon::Logs,
+                    "日志设置",
+                    None,
+                    self.center_ui.page == Page::Logs,
+                ) {
+                    self.center_ui.page = Page::Logs;
                 }
                 if nav_item(
                     ui,
@@ -1546,17 +1585,9 @@ impl DeviceCenterApp {
                         }
                     }
                     ui.separator();
-                    let path = std::path::absolute(&self.log_file)
-                        .unwrap_or_else(|_| self.log_file.clone());
-                    ui.label("日志文件");
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(path.display().to_string())
-                                .monospace()
-                                .color(MUTED),
-                        )
-                        .wrap(),
-                    );
+                    if ui.link("打开日志设置").clicked() {
+                        self.center_ui.page = Page::Logs;
+                    }
                 });
             });
     }
@@ -1863,6 +1894,15 @@ impl DeviceCenterApp {
     }
 
     fn login_page(&mut self, root: &mut egui::Ui) {
+        egui::Panel::top("login-log-settings")
+            .frame(egui::Frame::new().fill(BG).inner_margin(12))
+            .show(root, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.link("日志设置").clicked() {
+                        self.center_ui.page = Page::Logs;
+                    }
+                });
+            });
         let locked = self.login_restoring
             || self.logout_pending
             || self.active_session.is_some()

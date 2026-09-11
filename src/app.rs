@@ -1,6 +1,5 @@
 //! Native graphical device center and host-presence lifecycle.
 
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -23,6 +22,8 @@ use crate::viewer_owner::ViewerOwner;
 mod assist;
 mod catalog;
 mod diagnostics;
+#[cfg(windows)]
+pub mod instance;
 mod phone;
 mod updates;
 mod view;
@@ -36,8 +37,6 @@ const WORKER_TICK: Duration = Duration::from_millis(250);
 pub struct GuiOptions {
     pub refresh_interval: Duration,
     pub media: ConnectionMediaOptions,
-    pub log_level: String,
-    pub log_file: PathBuf,
 }
 
 pub fn run(options: GuiOptions) -> Result<()> {
@@ -76,8 +75,6 @@ pub fn run(options: GuiOptions) -> Result<()> {
                 refresh_interval,
                 local_display,
                 options.media,
-                options.log_level,
-                options.log_file,
                 display_warning,
             );
             if let Some(graphics) = graphics {
@@ -108,8 +105,6 @@ struct DeviceCenterApp {
     local_display: LocalDisplayInfo,
     media: ConnectionMediaOptions,
     presence: PresenceState,
-    log_level: String,
-    log_file: PathBuf,
     status: StatusMessage,
     refreshed_at: Option<Instant>,
     refresh_pending: bool,
@@ -135,8 +130,6 @@ impl DeviceCenterApp {
         refresh_interval: Duration,
         local_display: LocalDisplayInfo,
         media: ConnectionMediaOptions,
-        log_level: String,
-        log_file: PathBuf,
         display_warning: Option<String>,
     ) -> Self {
         Self {
@@ -158,8 +151,6 @@ impl DeviceCenterApp {
             local_display,
             media,
             presence: PresenceState::Connecting,
-            log_level,
-            log_file,
             status: display_warning.map_or_else(
                 || StatusMessage::info("正在读取设备并建立本机在线状态"),
                 StatusMessage::warning,
@@ -788,11 +779,7 @@ impl DeviceCenterApp {
                 return;
             }
         };
-        command
-            .arg("--log-level")
-            .arg(&self.log_level)
-            .arg("--log-file")
-            .arg(&self.log_file);
+        crate::logging::configure_child(&mut command);
         command.arg("connect").arg(&alias);
         if let Some(id) = &device_id
             && assist_request.is_none()

@@ -82,6 +82,7 @@ impl Runner {
             &self.config.viewport.clone().with_visible(false),
         )?;
         super::branding::set_taskbar_icon(&window);
+        crate::app::instance::register_window(super::d3d11::window_hwnd(&window)?)?;
         if self.config.centered
             && let Some(monitor) = window.current_monitor()
         {

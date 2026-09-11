@@ -529,7 +529,7 @@ impl WindowsConnectionApp {
                 egui_context,
                 egui_winit,
                 close_requested: false,
-                timing_audit: UiTimingAudit::enabled(),
+                timing_audit: None,
             },
             ViewerDisplayHandle {
                 surface_writer: Some(surface_writer),
@@ -583,7 +583,7 @@ impl WindowsConnectionApp {
         let presented = self
             .presenter
             .render(&self.egui_context, renderer_output, false)?;
-        if let Some(audit) = &mut self.timing_audit {
+        if let Some(audit) = UiTimingAudit::active(&mut self.timing_audit, started) {
             audit.record(
                 started,
                 layout_elapsed,
@@ -2104,7 +2104,7 @@ impl ThreadedWindowsApp {
         let presented = self
             .ui_presenter
             .render(&self.egui_context, renderer_output, true)?;
-        if let Some(audit) = &mut self.timing_audit {
+        if let Some(audit) = UiTimingAudit::active(&mut self.timing_audit, started) {
             audit.record(
                 started,
                 layout_elapsed,

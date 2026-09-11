@@ -445,7 +445,7 @@ impl SignalSession {
             let _ = session.graceful_close().await;
             return Err(error);
         }
-        tracing::debug!(room_info = %session.room_info, ?role, "signaling room login complete");
+        tracing::debug!(?role, "signaling room login complete");
         Ok(session)
     }
 
@@ -533,7 +533,7 @@ impl SignalSession {
         let mut local_candidates = peer.local_ice_candidates();
         let mut progress = NegotiationProgress::default();
         let offer = peer.create_offer().await?;
-        tracing::trace!(sdp = %offer, "local WebRTC offer");
+        tracing::trace!(sdp_bytes = offer.len(), "local WebRTC offer");
         let attachment = gzip_sdp(&offer)?;
         tracing::debug!(
             sdp_bytes = offer.len(),
@@ -735,11 +735,11 @@ impl SignalSession {
                         if event == "soac" =>
                     {
                         progress.remote_soac_events += 1;
-                        tracing::trace!(args = ?args, "received remote SOAC event");
+                        tracing::trace!(argument_count = args.len(), "received remote SOAC event");
                         match parse_remote_soac(&args, Some(info))? {
                             Some(RemoteSoac::Answer { sdp, restart_ice }) => {
                                 tracing::debug!(restart_ice, sdp_bytes = sdp.len(), "installing remote WebRTC answer");
-                                tracing::trace!(sdp = %sdp, "remote WebRTC answer");
+                                tracing::trace!(sdp_bytes = sdp.len(), "remote WebRTC answer");
                                 let sdp_bytes = sdp.len();
                                 peer.set_remote_answer(sdp, restart_ice).await?;
                                 answer_installed = true;

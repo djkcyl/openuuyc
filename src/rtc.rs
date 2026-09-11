@@ -506,14 +506,14 @@ async fn send_remote_input(
                 .and_then(|result| result.map(|_| ())),
         };
         if let Err(error) = &result {
-            tracing::warn!(%error, "mouse input transport failed");
+            tracing::warn!(target: "openuuyc::rtc::input", %error, "mouse input transport failed");
         }
         if !keyboard_submission_seen
             && result.is_ok()
             && matches!(event.event, crate::remote_input::InputEvent::Key { .. })
         {
             keyboard_submission_seen = true;
-            tracing::debug!("keyboard event submitted to CONTROL transport");
+            tracing::debug!(target: "openuuyc::rtc::input", "keyboard event submitted to CONTROL transport");
         }
         mouse.complete(&event, result);
     }

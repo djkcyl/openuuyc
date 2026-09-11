@@ -892,7 +892,7 @@ impl ControllerConnection {
             .await;
         viewer.ensure_running()?;
         if !keyframe_ready {
-            eprintln!("警告：PLI 后 2 秒内未识别到完整参数集和关键帧，已继续等待后续关键帧");
+            tracing::warn!("PLI 后 2 秒内未识别到完整参数集和关键帧，已继续等待后续关键帧");
             report_progress(
                 reporter,
                 12,

@@ -20,11 +20,11 @@ use openuuyc::{
 )]
 struct Cli {
     /// 日志过滤器，例如 info、debug、trace 或 openuuyc=trace
-    #[arg(long, global = true, default_value = logging::DEFAULT_FILTER)]
-    log_level: String,
-    /// 诊断日志文件
-    #[arg(long, global = true, default_value = "logs/openuuyc.log")]
-    log_file: PathBuf,
+    #[arg(long, global = true)]
+    log_level: Option<String>,
+    /// 指定诊断日志文件（默认写入用户日志目录并自动轮转）
+    #[arg(long, global = true)]
+    log_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -110,8 +110,6 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
-    let _logging = logging::init(&cli.log_level, &cli.log_file)?;
-    tracing::info!(target: "openuuyc", version = env!("CARGO_PKG_VERSION"), "application started");
     let command = cli.command.unwrap_or(Commands::Gui {
         refresh_seconds: 5,
         fps: media::FrameRateChoice::Auto,
@@ -119,6 +117,18 @@ fn main() -> Result<()> {
         hardware_decode: true,
         transport: media::TransportChoice::Auto,
     });
+
+    #[cfg(windows)]
+    let _instance = if matches!(command, Commands::Gui { .. }) {
+        match app::instance::acquire()? {
+            Some(instance) => Some(instance),
+            None => return Ok(()),
+        }
+    } else {
+        None
+    };
+    let _logging = logging::init(cli.log_level.as_deref(), cli.log_file.as_deref())?;
+    tracing::info!(target: "openuuyc", version = env!("CARGO_PKG_VERSION"), "application started");
 
     let result = match command {
         Commands::Gui {
@@ -136,8 +146,6 @@ fn main() -> Result<()> {
                 hardware_decode,
                 transport,
             },
-            log_level: cli.log_level.clone(),
-            log_file: cli.log_file.clone(),
         }),
         Commands::NativeStatus => {
             let sample = signal::encode_event("soac", &[], Some(1))?;
