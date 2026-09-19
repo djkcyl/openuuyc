@@ -67,7 +67,7 @@ const MAX_PENDING_KEYS: usize = 512;
 
 struct Router {
     installed: bool,
-    shortcut: Option<(u64, super::windows_presenter::ViewerShortcut)>,
+    shortcut: Option<(u64, super::presenter::ViewerShortcut)>,
     target: Option<Target>,
     physical: [bool; 256],
     blocked: [bool; 256],
@@ -847,7 +847,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM
     unsafe { CallNextHookEx(None, code, message, data) }
 }
 
-pub(super) fn take_shortcut(owner: u64) -> Option<super::windows_presenter::ViewerShortcut> {
+pub(super) fn take_shortcut(owner: u64) -> Option<super::presenter::ViewerShortcut> {
     with_router(|r| {
         if r.shortcut.is_some_and(|(id, _)| id == owner) {
             r.shortcut.take().map(|(_, command)| command)

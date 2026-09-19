@@ -25,7 +25,7 @@ pub(crate) enum Request {
     },
     Viewer {
         key: String,
-        config: crate::viewer::windows_presenter::ConnectingWindowsRunConfig,
+        config: crate::viewer::presenter::ConnectingWindowsRunConfig,
         done: tokio::sync::oneshot::Sender<Result<()>>,
     },
     Focus(String),
@@ -48,7 +48,7 @@ pub(crate) fn send(request: Request) -> Result<()> {
 }
 pub(crate) async fn viewer(
     key: String,
-    config: crate::viewer::windows_presenter::ConnectingWindowsRunConfig,
+    config: crate::viewer::presenter::ConnectingWindowsRunConfig,
 ) -> Result<()> {
     let (done, closed) = tokio::sync::oneshot::channel();
     send(Request::Viewer { key, config, done })?;

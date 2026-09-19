@@ -11,9 +11,9 @@ use windows::core::w;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use super::windows_presenter::title_bar_height_pixels;
-use crate::ui::d3d11::window_hwnd;
-pub(super) use crate::ui::d3d11::{UiPresenter, UiTimingAudit};
+use super::presenter::title_bar_height_pixels;
+use crate::ui::gfx::window_hwnd;
+pub(super) use crate::ui::gfx::{UiPresenter, UiTimingAudit};
 
 fn video_window_class() -> Result<()> {
     static REGISTERED: std::sync::OnceLock<std::result::Result<(), u32>> =

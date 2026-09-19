@@ -481,7 +481,7 @@ async fn run_viewer_window(
     let window_result = if let Some(key) = window_key {
         crate::ui::window_manager::viewer(
             key,
-            crate::viewer::windows_presenter::ConnectingWindowsRunConfig {
+            crate::viewer::presenter::ConnectingWindowsRunConfig {
                 alias,
                 progress: progress_receiver,
                 session: viewer_receiver,

@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Cursor, CursorGrabMode, CursorIcon, CustomCursor, Window};
 
-use super::windows_presenter::{fit_rect, title_bar_height_pixels};
+use super::presenter::{fit_rect, title_bar_height_pixels};
 type VideoSize = Arc<Mutex<Option<(u32, u32, u16)>>>;
 use crate::remote_input::{BUTTONS, MouseMode, RemoteInput};
 use crate::stream_control::StreamControlHandle;

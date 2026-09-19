@@ -1,4 +1,5 @@
 //! D3D11 egui composition shared by the device center and playback windows.
+use super::gfx::nonzero_size;
 use anyhow::{Context, Result, bail};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
@@ -30,6 +31,14 @@ pub(crate) struct UiPresenter {
 
 impl UiPresenter {
     pub(crate) fn new(
+        window: std::sync::Arc<Window>,
+        graphics: &super::gfx::Graphics,
+    ) -> Result<Self> {
+        Self::from_device(&window, graphics.device.clone(), graphics.context.clone())
+    }
+
+    /// The player already owns a device shared with its decoder surfaces.
+    pub(crate) fn from_device(
         window: &Window,
         device: ID3D11Device,
         context: ID3D11DeviceContext,
@@ -203,79 +212,6 @@ impl Drop for UiPresenter {
     }
 }
 
-/// Opt-in, aggregated UI-only diagnostics. No RTP hot-path counters or HUD.
-pub(crate) struct UiTimingAudit {
-    since: Instant,
-    previous: Option<(Instant, bool)>,
-    frames: u32,
-    presented: u32,
-    following_immediate: u32,
-    immediate_gap: Duration,
-    max_immediate_gap: Duration,
-    max_layout: Duration,
-    max_submit: Duration,
-}
-
-impl UiTimingAudit {
-    pub(crate) fn active(slot: &mut Option<Self>, at: Instant) -> Option<&mut Self> {
-        if tracing::enabled!(target: "openuuyc::ui_timing", tracing::Level::DEBUG) {
-            Some(slot.get_or_insert_with(|| Self::new(at)))
-        } else {
-            *slot = None;
-            None
-        }
-    }
-
-    fn new(since: Instant) -> Self {
-        Self {
-            since,
-            previous: None,
-            frames: 0,
-            presented: 0,
-            following_immediate: 0,
-            immediate_gap: Duration::ZERO,
-            max_immediate_gap: Duration::ZERO,
-            max_layout: Duration::ZERO,
-            max_submit: Duration::ZERO,
-        }
-    }
-
-    pub(crate) fn record(
-        &mut self,
-        at: Instant,
-        layout: Duration,
-        submit: Duration,
-        immediate: bool,
-        presented: bool,
-    ) {
-        self.frames += 1;
-        self.presented += u32::from(presented);
-        if let Some((previous, true)) = self.previous {
-            let gap = at.saturating_duration_since(previous);
-            self.following_immediate += 1;
-            self.immediate_gap += gap;
-            self.max_immediate_gap = self.max_immediate_gap.max(gap);
-        }
-        self.previous = Some((at, immediate));
-        self.max_layout = self.max_layout.max(layout);
-        self.max_submit = self.max_submit.max(submit);
-        if at.duration_since(self.since) >= Duration::from_secs(5) {
-            tracing::debug!(target: "openuuyc::ui_timing",
-                frames = self.frames, presented = self.presented,
-                seconds = at.duration_since(self.since).as_secs_f64(),
-                animation_intervals = self.following_immediate,
-                animation_avg_ms = self.immediate_gap.as_secs_f64() * 1000.0 / f64::from(self.following_immediate.max(1)),
-                animation_max_ms = self.max_immediate_gap.as_secs_f64() * 1000.0,
-                layout_max_ms = self.max_layout.as_secs_f64() * 1000.0,
-                submit_max_ms = self.max_submit.as_secs_f64() * 1000.0,
-                "UI refresh audit");
-            let previous = self.previous;
-            *self = Self::new(at);
-            self.previous = previous;
-        }
-    }
-}
-
 pub(crate) fn window_hwnd(window: &Window) -> Result<HWND> {
     let RawWindowHandle::Win32(handle) = window
         .window_handle()
@@ -300,8 +236,4 @@ pub(crate) fn create_backbuffer(
         backbuffer,
         target.context("D3D11 did not return a render target")?,
     ))
-}
-
-pub(crate) fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
-    PhysicalSize::new(size.width.max(1), size.height.max(1))
 }

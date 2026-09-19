@@ -1,5 +1,9 @@
-//! Device-scoped clipboard RPC with a process-wide Windows/OLE adapter.
+//! Device-scoped clipboard RPC with a process-wide platform adapter.
 mod formats;
+#[cfg(windows)]
+mod native;
+#[cfg(not(windows))]
+#[path = "clipboard/native_linux.rs"]
 mod native;
 mod protocol;
 use anyhow::{Result, anyhow, bail, ensure};

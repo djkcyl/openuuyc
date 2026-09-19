@@ -9,7 +9,7 @@ use crate::ui::chrome::{
 use crate::ui::controls::{
     ViewerCaptionIcon as TitleIcon, viewer_caption_button as title_icon_button,
 };
-use crate::ui::d3d11::{create_backbuffer, nonzero_size, window_hwnd};
+use crate::ui::gfx::{create_backbuffer, nonzero_size, window_hwnd};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -577,7 +577,7 @@ impl WindowsConnectionApp {
         );
         let surface_writer = crate::decoder::windows_surface::D3D11SurfaceWriter::new()?;
         let (renderer_device, renderer_context) = surface_writer.create_renderer_device()?;
-        let presenter = UiPresenter::new(window, renderer_device, renderer_context)?;
+        let presenter = UiPresenter::from_device(window, renderer_device, renderer_context)?;
         Ok((
             Self {
                 progress: ConnectionProgressApp::new(alias, receiver),

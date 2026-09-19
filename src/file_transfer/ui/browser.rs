@@ -33,17 +33,15 @@ impl Pane {
         let places = if remote {
             Vec::new()
         } else {
-            use windows::Win32::UI::Shell::{
-                FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
-            };
+            use crate::file_transfer::storage::KnownFolder;
             [
-                ("桌面", FOLDERID_Desktop),
-                ("下载", FOLDERID_Downloads),
-                ("文档", FOLDERID_Documents),
+                ("桌面", KnownFolder::Desktop),
+                ("下载", KnownFolder::Downloads),
+                ("文档", KnownFolder::Documents),
             ]
             .into_iter()
             .filter_map(|(name, id)| {
-                crate::file_transfer::storage::known_folder(&id)
+                crate::file_transfer::storage::known_folder(id)
                     .map(|p| (name.into(), p.to_string_lossy().into_owned()))
             })
             .collect()

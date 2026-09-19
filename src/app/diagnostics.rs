@@ -118,6 +118,7 @@ fn read_command(mut command: Command) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
+    #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
@@ -148,6 +149,7 @@ fn hardware() -> Vec<(String, String)> {
         format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH),
     )];
 
+    #[cfg(windows)]
     {
         let mut command = Command::new("powershell.exe");
         command.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-ItemProperty -LiteralPath 'HKLM:\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0'; @{os=($os.Caption + ' ' + $os.Version);cpu=$cpu.ProcessorNameString;memory=[math]::Round($os.TotalVisibleMemorySize / 1MB, 1)} | ConvertTo-Json -Compress"]);
@@ -166,6 +168,48 @@ fn hardware() -> Vec<(String, String)> {
             rows.push(("硬件信息".into(), "系统查询失败或超时".into()));
         }
     }
+    #[cfg(not(windows))]
+    {
+        // procfs and os-release answer the same questions without a shell.
+        if let Some(name) = os_release_name() {
+            rows.push(("操作系统".into(), name));
+        }
+        if let Some(model) = proc_field("/proc/cpuinfo", "model name") {
+            rows.push(("处理器".into(), model));
+        }
+        if let Some(total) = proc_field("/proc/meminfo", "MemTotal") {
+            if let Some(kib) = total
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+            {
+                rows.push(("物理内存".into(), format!("{:.1} GiB", kib / 1_048_576.0)));
+            }
+        }
+    }
 
     rows
+}
+
+#[cfg(not(windows))]
+fn os_release_name() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME="))?
+        .trim_matches('"')
+        .to_owned();
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    Some(match kernel {
+        Some(kernel) => format!("{value} / Linux {}", kernel.trim()),
+        None => value,
+    })
+}
+
+#[cfg(not(windows))]
+fn proc_field(path: &str, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .find_map(|line| line.split_once(':').filter(|(name, _)| name.trim() == key))
+        .map(|(_, value)| value.trim().to_owned())
 }

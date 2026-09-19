@@ -377,12 +377,22 @@ struct PendingCapturePreferences {
 struct StreamControlState {
     peer_clipboard: i32,
     clipboard_files_allowed: bool,
+    /// Last reported value of the clipboard gate, so the diagnostic only fires
+    /// when it changes.
+    clipboard_ready_reported: bool,
     remote_upgrade: Option<crate::remote_upgrade::RemoteUpgrade>,
     annotation: annotation::Annotation,
     custom_bitrate_limit: u32,
     features: Option<crate::feature_ability::FeaturePolicy>,
     remote_notice: Option<(Instant, &'static str)>,
     preferred_mouse_mode: MouseMode,
+    /// Take control automatically once the control channel is usable.
+    auto_mouse_control: bool,
+    /// Set when the viewer explicitly gives control back, so an automatic
+    /// hand-over does not fight that choice on the next reconnect.
+    auto_mouse_declined: bool,
+    /// Keeps the "still waiting" diagnostic to one line per session.
+    auto_mouse_reported: bool,
     remote_cursor: crate::remote_cursor::RemoteCursorState,
     peer_mouse_relative: Option<bool>,
     cursor_sync_needed: bool,
@@ -449,14 +459,22 @@ impl StreamControlHandle {
             .clamp(1, profile.stream_fps.max(1));
         let mouse = crate::remote_input::RemoteInput::default();
         let cursor = crate::remote_cursor::RemoteCursorState::default();
+        tracing::debug!(
+            auto_mouse_control = profile.auto_mouse_control,
+            "stream control created"
+        );
         let state = StreamControlState {
             peer_clipboard: 0,
             clipboard_files_allowed: true,
+            clipboard_ready_reported: false,
             remote_upgrade: None,
             annotation: Default::default(),
             custom_bitrate_limit: MAX_CUSTOM_BITRATE_MBPS,
             features: None,
             preferred_mouse_mode: MouseMode::Smart,
+            auto_mouse_control: profile.auto_mouse_control,
+            auto_mouse_declined: false,
+            auto_mouse_reported: false,
             remote_notice: None,
             remote_cursor: cursor.clone(),
             peer_mouse_relative: None,
@@ -546,9 +564,13 @@ impl StreamControlHandle {
             volume: 100,
             muted: profile.muted,
         });
+        let clipboard = crate::clipboard::Clipboard::new();
+        // The connection setting decides where the per-session 文件复制 switch
+        // starts; the player can still turn it on or off afterwards.
+        clipboard.set_files(profile.clipboard_files);
         (
             Self {
-                clipboard: crate::clipboard::Clipboard::new(),
+                clipboard,
                 files: Arc::new(crate::file_transfer::Transport::default()),
                 mouse,
                 cursor,
@@ -608,6 +630,7 @@ impl StreamControlHandle {
                     && state.control_channel_open
                     && state.text_channel_open,
             );
+            self.maybe_auto_take_mouse(&mut state);
             self.maybe_send_initial_capture_sync(&mut state);
         }
     }
@@ -642,6 +665,12 @@ impl StreamControlHandle {
     }
     pub(crate) fn remote_cursor_hidden(&self) -> bool {
         self.cursor.hidden()
+    }
+
+    /// Whether the host is drawing its own pointer into the captured frames.
+    /// While it is not, nothing but this client can put a pointer on screen.
+    pub(crate) fn remote_cursor_captured(&self) -> bool {
+        lock(&self.shared).baseline.cursor_capture
     }
 
     pub fn snapshot(&self) -> StreamControlSnapshot {
@@ -1015,27 +1044,73 @@ impl StreamControlHandle {
 
     pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
         let mut state = lock(&self.shared);
-        expire_cursor_request(&mut state);
+        // An explicit choice overrides the automatic hand-over, in both
+        // directions, for the rest of this session.
+        state.auto_mouse_declined = mode == MouseMode::View;
+        let result = self.apply_mouse_mode(&mut state, mode);
+        drop(state);
+        self.mouse.repaint();
+        result
+    }
+
+    fn apply_mouse_mode(&self, state: &mut StreamControlState, mode: MouseMode) -> Result<()> {
+        expire_cursor_request(state);
         state.mouse_restore_point = None;
         if mode == MouseMode::View {
             // Local revocation never waits for remote settings.
             state.mouse.disable();
         } else {
-            ensure_ready(&state)?;
+            ensure_ready(state)?;
             if state.annotation.enabled || state.annotation.toggling() {
                 bail!("请先关闭批注，再开启键鼠控制");
             }
-            let (relative, _) = mouse_policy(&state, mode);
+            let (relative, _) = mouse_policy(state, mode);
             state.mouse.enable(mode, relative)?;
             state.preferred_mouse_mode = mode;
         }
         // Explicit choices may retry uncertain cursor capture; newer intent is
         // independent of an earlier cursor request still awaiting its response.
         state.cursor_sync_needed = true;
-        self.refresh_mouse_policy(&mut state);
-        drop(state);
-        self.mouse.repaint();
+        self.refresh_mouse_policy(state);
         Ok(())
+    }
+
+    /// Hand control over as soon as it is possible, when the viewer asked for
+    /// that in the connection settings and has not taken it back since.
+    fn maybe_auto_take_mouse(&self, state: &mut StreamControlState) {
+        if !state.auto_mouse_control
+            || state.auto_mouse_declined
+            || state.mouse.mode() != MouseMode::View
+        {
+            return;
+        }
+        if !state.viewing_enabled
+            || state.annotation.enabled
+            || state.annotation.toggling()
+            || ensure_ready(state).is_err()
+        {
+            if !state.auto_mouse_reported {
+                state.auto_mouse_reported = true;
+                tracing::debug!(
+                    viewing = state.viewing_enabled,
+                    annotation = state.annotation.enabled,
+                    ready = ensure_ready(state).is_ok(),
+                    "自动键鼠控制等待连接就绪"
+                );
+            }
+            return;
+        }
+        let mode = state.preferred_mouse_mode;
+        let mode = if mode == MouseMode::View {
+            MouseMode::Smart
+        } else {
+            mode
+        };
+        if let Err(error) = self.apply_mouse_mode(state, mode) {
+            tracing::debug!(%error, "自动开启键鼠控制暂不可用");
+        } else {
+            tracing::info!(?mode, "已按连接设置自动开启键鼠控制");
+        }
     }
 
     fn request_cursor_locked(&self, state: &mut StreamControlState, visible: bool) -> Result<i64> {
@@ -1309,6 +1384,9 @@ impl StreamControlHandle {
         let mut state = lock(&self.shared);
         self.drive_display_changes(&mut state);
         expire_cursor_request(&mut state);
+        // Readiness can complete through several different paths; checking here
+        // means the hand-over does not depend on which one finished last.
+        self.maybe_auto_take_mouse(&mut state);
         self.refresh_mouse_policy(&mut state);
     }
 
@@ -1366,6 +1444,7 @@ impl StreamControlHandle {
             && state.text_channel_open
         {
             state.mouse.set_ready(state.mouse_transport_connected);
+            self.maybe_auto_take_mouse(&mut state);
         }
         drop(state);
         if !open {
@@ -1540,6 +1619,7 @@ impl StreamControlHandle {
                                     && protocol(&state) == StreamControlProtocol::CaptureSetting,
                             );
                             handshake_changed = true;
+                            self.maybe_auto_take_mouse(&mut state);
                             state.last_error = (protocol(&state)
                                 == StreamControlProtocol::Unsupported)
                                 .then(|| "对端不支持当前串流协议（需要CaptureSetting RPC）".into());
@@ -1744,14 +1824,32 @@ impl StreamControlHandle {
     }
 
     fn refresh_mouse_policy(&self, state: &mut StreamControlState) {
+        let clipboard_ready = state.viewing_enabled
+            && state.pb_connected
+            && state.control_channel_open
+            && state.text_channel_open
+            && state.mouse_transport_connected
+            && state.peer_clipboard >= 1
+            && state.mouse.mode() != MouseMode::View;
+        // Clipboard sync is gated on seven separate conditions, and a session
+        // that never syncs looks identical whichever one is missing.
+        if clipboard_ready != state.clipboard_ready_reported {
+            state.clipboard_ready_reported = clipboard_ready;
+            tracing::debug!(
+                ready = clipboard_ready,
+                viewing = state.viewing_enabled,
+                pb = state.pb_connected,
+                control = state.control_channel_open,
+                text = state.text_channel_open,
+                mouse_transport = state.mouse_transport_connected,
+                peer = state.peer_clipboard,
+                mode = ?state.mouse.mode(),
+                files_allowed = state.clipboard_files_allowed,
+                "剪贴板同步条件"
+            );
+        }
         self.clipboard.policy(
-            state.viewing_enabled
-                && state.pb_connected
-                && state.control_channel_open
-                && state.text_channel_open
-                && state.mouse_transport_connected
-                && state.peer_clipboard >= 1
-                && state.mouse.mode() != MouseMode::View,
+            clipboard_ready,
             state.peer_clipboard >= 2 && state.clipboard_files_allowed,
         );
         if !state.viewing_enabled {
@@ -1759,6 +1857,10 @@ impl StreamControlHandle {
         }
         let mode = state.mouse.mode();
         let (relative, wanted) = mouse_policy(state, mode);
+        // Relative motion is only correct while this client holds the pointer.
+        // A window that could not take it says so, and absolute positioning is
+        // then the only honest way to aim, whatever the policy would prefer.
+        let relative = relative && state.mouse.relative_available();
         if mode == MouseMode::Smart && state.mouse.relative_mode() != relative {
             state.mouse.set_relative_mode(relative);
         }
@@ -2501,7 +2603,15 @@ fn mouse_policy(state: &StreamControlState, mode: MouseMode) -> (bool, bool) {
         MouseMode::Smart => match state.peer_mouse_relative {
             Some(true) => (true, true),
             Some(false) => (false, false),
-            None => (state.remote_cursor.hidden(), false),
+            // The host says a game took the mouse with `special_game_mouse`,
+            // and that report is what pairs relative input with the host
+            // drawing its own pointer into the picture. Until it arrives,
+            // absolute positioning is the only coherent choice: inferring
+            // relative input from a hidden cursor fires on an ordinary desktop
+            // -- Windows hides the pointer for anyone typing, for as long as
+            // they type -- and leaves the client sending deltas while nothing
+            // draws a pointer to aim with.
+            None => (false, false),
         },
     }
 }
