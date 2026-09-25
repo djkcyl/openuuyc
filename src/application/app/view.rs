@@ -887,7 +887,7 @@ impl DeviceCenterApp {
         let baseline = bounds.top() + 62.0;
         ui.painter()
             .circle_filled(egui::pos2(left + 3.0, baseline), 3.0, color);
-        ui.painter().text(
+        let presence_rect = ui.painter().text(
             egui::pos2(left + 13.0, baseline),
             egui::Align2::LEFT_CENTER,
             presence,
@@ -896,7 +896,10 @@ impl DeviceCenterApp {
         );
         self.draw_version(
             ui,
-            egui::Rect::from_center_size(egui::pos2(right - 32.0, baseline), vec2(64.0, 22.0)),
+            egui::Rect::from_min_max(
+                egui::pos2((presence_rect.right() + 8.0).min(right), baseline - 11.0),
+                egui::pos2(right, baseline + 11.0),
+            ),
         );
     }
 
@@ -913,25 +916,25 @@ impl DeviceCenterApp {
             State::Current => (
                 current.clone(),
                 MUTED,
-                "已是最新正式版，点击重新检查".into(),
+                format!("当前版本 {current}，已是最新正式版，点击重新检查"),
                 None,
             ),
             State::Ahead => (
                 current.clone(),
                 MUTED,
-                "当前版本高于 GitHub 最新正式版，点击重新检查".into(),
+                format!("当前版本 {current} 高于 GitHub 最新正式版，点击重新检查"),
                 None,
             ),
             State::NoRelease => (
                 current.clone(),
                 MUTED,
-                "暂无公开正式版本，点击重新检查".into(),
+                format!("当前版本 {current}，暂无公开正式版本，点击重新检查"),
                 None,
             ),
             State::Failed(error) => (
                 format!("{current} !"),
                 AMBER,
-                format!("检查更新失败：{error}\n点击重试"),
+                format!("当前版本 {current}\n检查更新失败：{error}\n点击重试"),
                 None,
             ),
             State::Available { version, url, .. } => {
@@ -954,14 +957,16 @@ impl DeviceCenterApp {
         if !checking && destination.is_none() && wait > 0 {
             hint.push_str(&format!("\n{wait} 秒后可重新检查"));
         }
-        let text_size = ui
-            .painter()
-            .layout_no_wrap(
-                label.clone(),
-                FontId::proportional(crate::ui::theme::TINY),
-                color,
-            )
-            .size();
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            label,
+            FontId::proportional(crate::ui::theme::TINY),
+            Color32::PLACEHOLDER,
+        );
+        job.wrap.max_width = rect.width().max(0.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let text = ui.painter().layout_job(job);
+        let text_size = text.size();
         let hit_rect = egui::Rect::from_min_size(
             rect.right_center() - vec2(text_size.x, text_size.y * 0.5),
             text_size,
@@ -990,11 +995,9 @@ impl DeviceCenterApp {
         };
         ui.painter()
             .with_clip_rect(rect.intersect(ui.clip_rect()))
-            .text(
-                rect.right_center(),
-                egui::Align2::RIGHT_CENTER,
-                label,
-                FontId::proportional(crate::ui::theme::TINY),
+            .galley(
+                rect.right_center() - vec2(text_size.x, text_size.y * 0.5),
+                text,
                 if enabled && response.hovered() {
                     BLUE
                 } else {
