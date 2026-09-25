@@ -85,7 +85,9 @@ fn main() -> Result<()> {
     let candidate = stage.path().join(&file_name);
     ensure!(
         command("upx")
-            .args(["--best", "--lzma", "-o"])
+            // NRV preserves startup on current Windows builds where the LZMA
+            // image can pass UPX integrity checking but fail loader initialization.
+            .args(["--best", "-o"])
             .arg(&candidate)
             .arg(&source)
             .status()
@@ -285,7 +287,8 @@ fn check_startup(executable: &Path, root: &Path, version: &str) -> Result<()> {
     ensure!(
         status.success()
             && String::from_utf8_lossy(&output).trim() == format!("OpenUUYC {version}"),
-        "release startup check failed: {}",
+        "release startup check failed ({status}): stdout={} stderr={}",
+        String::from_utf8_lossy(&output),
         String::from_utf8_lossy(&errors)
     );
     Ok(())
