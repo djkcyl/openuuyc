@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(
     non_snake_case,
     reason = "The executable uses the OpenUUYC product name."
@@ -50,6 +50,12 @@ enum Commands {
         /// 传输策略：auto、p2p 或 relay
         #[arg(long, default_value = "auto")]
         transport: media::TransportChoice,
+        /// 连接后是否自动开启键鼠控制
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        auto_mouse_control: bool,
+        /// 是否默认开启剪贴板文件复制
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        clipboard_files: bool,
     },
     /// 显示原生传输实现状态
     NativeStatus,
@@ -90,6 +96,12 @@ enum Commands {
         /// 传输策略：auto、p2p 或 relay
         #[arg(long, default_value = "auto")]
         transport: media::TransportChoice,
+        /// 连接后是否自动开启键鼠控制
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        auto_mouse_control: bool,
+        /// 是否默认开启剪贴板文件复制
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        clipboard_files: bool,
     },
     /// 检查解密 RTP 捕获的流、包数量与原始字节可重放性
     RtpCaptureInfo { path: PathBuf },
@@ -119,6 +131,8 @@ fn main() -> Result<()> {
         codec: media::CodecPreference::Auto,
         hardware_decode: true,
         transport: media::TransportChoice::Auto,
+        auto_mouse_control: true,
+        clipboard_files: false,
     });
 
     let _instance = if matches!(command, Commands::Gui { .. }) {
@@ -141,6 +155,8 @@ fn main() -> Result<()> {
             codec,
             hardware_decode,
             transport,
+            auto_mouse_control,
+            clipboard_files,
         } => app::run(app::GuiOptions {
             media: media::ConnectionMediaOptions {
                 muted: false,
@@ -148,6 +164,8 @@ fn main() -> Result<()> {
                 codec,
                 hardware_decode,
                 transport,
+                auto_mouse_control,
+                clipboard_files,
             },
         }),
         Commands::NativeStatus => {
@@ -158,7 +176,10 @@ fn main() -> Result<()> {
             println!(
                 "media: decrypted RTP -> complete Annex-B frames -> native platform decode -> Rust GUI"
             );
+            #[cfg(windows)]
             println!("decode backends: Windows Rust DXVA11 / Rust H.264 software");
+            #[cfg(not(windows))]
+            println!("decode backends: Rust H.264 software");
             println!("signal events: {}", signal::KNOWN_EVENTS.join(", "));
             println!(
                 "signal headers: {}, {}, {}",
@@ -203,6 +224,8 @@ fn main() -> Result<()> {
             codec,
             hardware_decode,
             transport,
+            auto_mouse_control,
+            clipboard_files,
         } => tokio::runtime::Runtime::new()?.block_on(connect_device(
             device,
             media::ConnectionMediaOptions {
@@ -211,6 +234,8 @@ fn main() -> Result<()> {
                 codec,
                 hardware_decode,
                 transport,
+                auto_mouse_control,
+                clipboard_files,
             },
             device_id,
             assist_stdin,
@@ -242,12 +267,15 @@ fn main() -> Result<()> {
 }
 
 fn attach_parent_console() {
-    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-
     // Attach before printing clap output. Explorer has no parent console;
     // inherited STARTF_USESTDHANDLES pipes/files remain redirected on attach.
     // Never allocate a console just for launching the device center or viewer.
-    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+    // A Linux process is started from its terminal and keeps those streams.
 }
 
 async fn connect_device(

@@ -1,27 +1,24 @@
-use super::d3d11::UiPresenter;
+use super::gfx::{UiPresenter, create_device, split_output};
 use super::window_manager::{self, Event, Repaint, Request};
 use super::{AppFactory, AppSession, WindowConfig};
-use crate::viewer::windows_presenter::ConnectingWindowsRunner;
+use crate::viewer::presenter::ConnectingWindowsRunner;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_11_0,
-};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice};
-use windows::core::Interface;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+#[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut builder = EventLoop::<Event>::with_user_event();
+    // The Windows keyboard hook needs to see raw messages before winit does.
+    #[cfg(windows)]
     builder.with_msg_hook(crate::viewer::desktop_input_message);
     let event_loop = builder.build().context("create desktop event loop")?;
     let _input_hook = crate::viewer::desktop_input_hook()?;
@@ -41,7 +38,7 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
     window_manager::install(Some(event_loop.create_proxy()));
     event_loop
         .run_app(&mut runner)
-        .context("run D3D11 desktop event loop")?;
+        .context("run desktop event loop")?;
     window_manager::install(None);
     crate::clipboard::shutdown();
     if let Some(error) = runner.main.error.take() {
@@ -76,7 +73,7 @@ struct DesktopWindow {
     next_repaint: Option<Instant>,
     last_frame: Option<Instant>,
     interval: Duration,
-    window: Window,
+    window: Arc<Window>,
 }
 
 impl Drop for DesktopWindow {
@@ -117,15 +114,15 @@ impl Runner {
             size.y += caption_height;
         }
         let min_inner_size = viewport_builder.min_inner_size;
-        let window = egui_winit::create_window(
+        let window = Arc::new(egui_winit::create_window(
             &context,
             event_loop,
             &viewport_builder.with_visible(false).with_decorations(false),
-        )?;
+        )?);
         super::chrome::configure_dwm_window(&window);
         super::branding::set_taskbar_icon(&window);
         if self.root {
-            crate::app::instance::register_window(super::d3d11::window_hwnd(&window)?)?;
+            crate::app::instance::register_window(&window)?;
         }
         if self.config.centered
             && let Some(monitor) = window.current_monitor()
@@ -138,12 +135,12 @@ impl Runner {
                 origin.y + (size.height as i64 - outer.height as i64).max(0) as i32 / 2,
             ));
         }
-        let (device, immediate, graphics) = create_device()?;
-        let presenter = UiPresenter::new(&window, device, immediate)?;
+        let graphics = create_device()?;
+        let presenter = UiPresenter::new(window.clone(), &graphics)?;
         let input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
-            &window,
+            &*window,
             Some(window.scale_factor() as f32),
             window.theme(),
             None,
@@ -168,7 +165,7 @@ impl Runner {
             .factory
             .take()
             .context("desktop factory already consumed")?;
-        let app = AppSession(factory(&context, Some(graphics)));
+        let app = AppSession(factory(&context, Some(graphics.label().to_owned())));
         let refresh = window
             .current_monitor()
             .and_then(|monitor| monitor.refresh_rate_millihertz())
@@ -271,7 +268,7 @@ impl DesktopWindow {
             self.app.0.ui(ui);
             super::controls::show_notices(ui.ctx());
         });
-        let (drawing, platform, mut viewports) = egui_directx11::split_output(output);
+        let (drawing, platform, mut viewports) = split_output(output);
         self.input.handle_platform_output(&self.window, platform);
         if let Some(root) = viewports.remove(&egui::ViewportId::ROOT) {
             for command in &root.commands {
@@ -615,50 +612,4 @@ impl ApplicationHandler<Event> for Windows {
         self.windows.clear();
         self.main.exiting(event_loop);
     }
-}
-
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String)> {
-    let mut last_error = None;
-    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                driver,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[
-                    D3D_FEATURE_LEVEL_11_0,
-                    D3D_FEATURE_LEVEL_10_1,
-                    D3D_FEATURE_LEVEL_10_0,
-                ]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        match result {
-            Ok(()) => {
-                let device = device.context("D3D11 did not return a GUI device")?;
-                let context = context.context("D3D11 did not return a GUI context")?;
-                let adapter: IDXGIAdapter1 =
-                    unsafe { device.cast::<IDXGIDevice>()?.GetAdapter() }?.cast()?;
-                let desc = unsafe { adapter.GetDesc1() }?;
-                let length = desc
-                    .Description
-                    .iter()
-                    .position(|value| *value == 0)
-                    .unwrap_or(desc.Description.len());
-                let graphics = format!(
-                    "{} · D3D11",
-                    String::from_utf16_lossy(&desc.Description[..length])
-                );
-                return Ok((device, context, graphics));
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(anyhow!("create GUI D3D11 device: {:?}", last_error))
 }

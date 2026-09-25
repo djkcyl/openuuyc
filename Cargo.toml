@@ -25,6 +25,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 display-info = "0.5.9"
 dunce = "1.0"
 egui = { version = "0.36.1", default-features = false, features = ["bytemuck", "default_fonts"] }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
 flate2 = "1.1"
 futures-util = "0.3.34"
 hmac = "0.12.1"
@@ -58,6 +59,12 @@ webrtc = { path = "vendor/webrtc" }
 webrtc-srtp = "0.17.2"
 yuv = "0.8.17"
 object = { version = "0.37.3", default-features = false, features = ["read_core", "std", "pe"] }
+openuuyc-plugin-api = { path = "plugins/sdk" }
+openuuyc-h264 = { path = "src/decoder/h264-core" }
+oxideav-h264 = { version = "=0.1.8" }
+oxideav-h265 = { version = "=0.0.10" }
+libloading = "0.8.9"
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [build-dependencies]
 cc = "1.2"
@@ -65,14 +72,7 @@ embed-resource = "3.0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62.2"
-openuuyc-plugin-api = { path = "plugins/sdk" }
-libloading = "0.8.9"
-openuuyc-h264 = { path = "src/decoder/h264-core" }
-oxideav-h264 = { version = "=0.1.8" }
-oxideav-h265 = { version = "=0.0.10" }
 egui-directx11 = { path = "vendor/egui-directx11" }
-egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
@@ -100,6 +100,18 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cros-libva = { path = "vendor/cros-libva" }
+egui-wgpu = { version = "0.36.1", default-features = false }
+wgpu = { version = "30.0", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "x11", "wayland"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+libc = "0.2"
+fuser = { version = "0.15", default-features = false }
+x11rb = "0.13"
+pollster = "0.4"
 
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }

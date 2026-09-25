@@ -924,15 +924,11 @@ pub(super) fn local_list(path: &str) -> Result<Vec<FileEntry>> {
     for e in std::fs::read_dir(root)? {
         let e = e?;
         let m = std::fs::symlink_metadata(e.path())?;
-        use std::os::windows::fs::MetadataExt;
+        let link = storage::is_link(&m);
         entries.push(FileEntry {
             entry_type: if m.is_dir() {
-                if m.file_attributes() & 0x400 != 0 {
-                    2
-                } else {
-                    0
-                }
-            } else if m.file_attributes() & 0x400 != 0 {
+                if link { 2 } else { 0 }
+            } else if link {
                 5
             } else {
                 4

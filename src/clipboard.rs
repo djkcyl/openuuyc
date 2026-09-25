@@ -1,7 +1,17 @@
-//! Device-scoped clipboard RPC with a process-wide Windows/OLE adapter.
+//! Device-scoped clipboard RPC with a process-wide platform adapter.
 mod formats;
+#[cfg(not(windows))]
+#[path = "clipboard/fuse_linux.rs"]
+mod fuse;
+#[cfg(windows)]
+mod native;
+#[cfg(not(windows))]
+#[path = "clipboard/native_linux.rs"]
 mod native;
 mod protocol;
+#[cfg(not(windows))]
+#[path = "clipboard/x11_offer_linux.rs"]
+mod x11_offer;
 use anyhow::{Result, anyhow, bail, ensure};
 use prost::Message;
 use protocol::*;

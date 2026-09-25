@@ -732,48 +732,8 @@ struct LocalFiles {
     items: Vec<LocalFile>,
     object: Option<IDataObject>,
 }
-pub(super) fn safe_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.encode_utf16().count() < 260
-        && !s.contains(['\0', ':'])
-        && !s.starts_with(['\\', '/'])
-        && s.split(['\\', '/']).all(|p| {
-            !p.is_empty()
-                && p != "."
-                && p != ".."
-                && !p.ends_with(['.', ' '])
-                && !p.chars().any(|c| c < ' ' || "<>\"|?*".contains(c))
-                && !matches!(
-                    p.split('.')
-                        .next()
-                        .unwrap_or("")
-                        .to_ascii_uppercase()
-                        .as_str(),
-                    "CON"
-                        | "PRN"
-                        | "AUX"
-                        | "NUL"
-                        | "COM1"
-                        | "COM2"
-                        | "COM3"
-                        | "COM4"
-                        | "COM5"
-                        | "COM6"
-                        | "COM7"
-                        | "COM8"
-                        | "COM9"
-                        | "LPT1"
-                        | "LPT2"
-                        | "LPT3"
-                        | "LPT4"
-                        | "LPT5"
-                        | "LPT6"
-                        | "LPT7"
-                        | "LPT8"
-                        | "LPT9"
-                )
-        })
-}
+pub(super) use super::formats::safe_name;
+
 fn collect_file(path: &Path, root: &Path, name: &str, items: &mut Vec<LocalFile>) -> Result<()> {
     ensure!(
         items.len() < MAX_FILES && safe_name(name),

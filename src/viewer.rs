@@ -29,24 +29,43 @@ use stream_menu::{StreamControlUi, show_stream_control_window};
 mod annotation;
 mod display_transition;
 
+#[cfg(windows)]
 mod windows_cursor;
 
+#[cfg(windows)]
 mod windows_keyboard;
 
+#[cfg(windows)]
 mod windows_mouse;
 
-pub(crate) mod windows_presenter;
+#[cfg(windows)]
+#[path = "viewer/windows_presenter.rs"]
+pub(crate) mod presenter;
+#[cfg(not(windows))]
+#[path = "viewer/linux_presenter.rs"]
+pub(crate) mod presenter;
+
+/// Windows installs a low-level keyboard hook so system keys reach the remote
+/// desktop. X11 and Wayland deliver keys through the focused window instead.
 pub(crate) struct DesktopInputHook {
+    #[cfg(windows)]
     _hook: windows_keyboard::KeyboardHook,
 }
+#[cfg(windows)]
 pub(crate) fn desktop_input_message(message: *const std::ffi::c_void) -> bool {
     windows_keyboard::message(message) || windows_mouse::router().message(message)
 }
 pub(crate) fn desktop_input_hook() -> Result<DesktopInputHook> {
-    windows_keyboard::remove_unused_raw_keyboard()?;
-    windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
+    #[cfg(windows)]
+    {
+        windows_keyboard::remove_unused_raw_keyboard()?;
+        windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
+    }
+    #[cfg(not(windows))]
+    Ok(DesktopInputHook {})
 }
 
+#[cfg(windows)]
 mod windows_ui;
 
 const CONNECTION_PROGRESS_STEPS: u8 = 13;
@@ -124,7 +143,7 @@ pub(crate) fn run_connecting_viewer_window(
     display_sender: oneshot::Sender<ViewerDisplayHandle>,
 ) -> Result<()> {
     {
-        windows_presenter::run_connecting(windows_presenter::ConnectingWindowsRunConfig {
+        presenter::run_connecting(presenter::ConnectingWindowsRunConfig {
             alias,
             progress,
             session,
@@ -701,7 +720,7 @@ impl NativeViewerSession {
     }
 
     pub fn run(self) -> Result<()> {
-        windows_presenter::run(self)
+        presenter::run(self)
     }
 }
 
@@ -801,6 +820,8 @@ fn decoder_manager(
     tracing::debug!(codec = ?config.codec, hardware_decode = config.hardware_decode,
         "native decoder initialization deferred until the first frame's parameter sets");
     let mut active_codec = config.codec;
+    // Only log the format when it actually changes, not once per frame.
+    let mut last_format_label: Option<String> = None;
     // Open against real SPS/PPS/VPS and coded dimensions. The local display
     // is only a startup hint, not the compressed stream's allocation geometry.
     let mut pool: Option<DecoderPool> = None;
@@ -1028,13 +1049,19 @@ fn decoder_manager(
         }
         if frame.codec != active_codec {
             active_codec = frame.codec;
+            last_format_label = None;
             performance.set_video_codec(match active_codec {
                 VideoCodec::H264 => "H.264/AVC",
                 VideoCodec::H265 => "H.265/HEVC",
             });
         }
         if let Some(format) = format {
-            performance.set_video_format(video_format_label(active_codec, format));
+            let label = video_format_label(active_codec, format);
+            if last_format_label.as_deref() != Some(label.as_str()) {
+                tracing::info!(format = %label, "video format in use");
+                last_format_label = Some(label.clone());
+            }
+            performance.set_video_format(label);
         }
 
         let cutover = cutover_state.evaluate(&frame, format);
@@ -1230,6 +1257,7 @@ fn open_decoder_with_metadata(
 }
 
 fn video_format_label(codec: VideoCodec, format: VideoFormatSignature) -> String {
+    let codec_kind = codec;
     let codec = match codec {
         VideoCodec::H264 => "H.264/AVC",
         VideoCodec::H265 => "H.265/HEVC",
@@ -1249,9 +1277,33 @@ fn video_format_label(codec: VideoCodec, format: VideoFormatSignature) -> String
         String::new()
     };
     format!(
-        "{codec} · {}×{}{} · {chroma} · {}-bit",
-        format.visible_width, format.visible_height, coded, format.bit_depth_luma
+        "{codec} · {}×{}{} · {chroma} · {}-bit · {}",
+        format.visible_width,
+        format.visible_height,
+        coded,
+        format.bit_depth_luma,
+        profile_name(codec_kind, format.profile_idc)
     )
+}
+
+/// The profile decides which hardware decode path a backend can ask for, so it
+/// belongs next to the resolution in every diagnostic.
+fn profile_name(codec: VideoCodec, profile_idc: u8) -> String {
+    let name = match (codec, profile_idc) {
+        (VideoCodec::H264, 66) => "Baseline",
+        (VideoCodec::H264, 77) => "Main",
+        (VideoCodec::H264, 88) => "Extended",
+        (VideoCodec::H264, 100) => "High",
+        (VideoCodec::H264, 110) => "High 10",
+        (VideoCodec::H264, 122) => "High 4:2:2",
+        (VideoCodec::H264, 244) => "High 4:4:4",
+        (VideoCodec::H265, 1) => "Main",
+        (VideoCodec::H265, 2) => "Main 10",
+        (VideoCodec::H265, 3) => "Main Still Picture",
+        (VideoCodec::H265, 4) => "Range Extensions",
+        _ => return format!("profile {profile_idc}"),
+    };
+    format!("{name} profile")
 }
 
 fn process_decoded_batch(
@@ -1701,6 +1753,7 @@ pub(crate) fn install_system_cjk_font(ctx: &egui::Context) {
 fn system_cjk_font_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
+    #[cfg(windows)]
     {
         let fonts = std::env::var_os("WINDIR")
             .map(PathBuf::from)
@@ -1708,6 +1761,24 @@ fn system_cjk_font_candidates() -> Vec<PathBuf> {
             .join("Fonts");
         for name in ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"] {
             paths.push(fonts.join(name));
+        }
+    }
+
+    // Distributions place CJK fonts under a few well-known names; fontconfig
+    // is not linked in, so the list is walked directly.
+    #[cfg(not(windows))]
+    {
+        for path in [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Regular.otf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+        ] {
+            paths.push(PathBuf::from(path));
         }
     }
 
