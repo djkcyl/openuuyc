@@ -152,13 +152,19 @@ pub fn residual(
     }
     let mut suffix = u32::from(total > 10 && trailing < 3);
     for (i, level) in levels.iter_mut().enumerate().take(total).skip(trailing) {
-        let mut prefix = 0;
-        while bits.read(1)? == 0 {
-            prefix += 1;
-            if prefix > 28 {
-                return Err(Error::Invalid(crate::Fault::CavlcLevelPrefix));
-            }
+        // One bounded load replaces the unary bit loop. On failure preserve
+        // its consumed-zero count (29 rejects overflow, fewer means EOF).
+        let prefix = bits.peek_padded(32).leading_zeros();
+        if prefix > 28 {
+            let consumed = bits.remaining().min(29);
+            bits.skip(consumed)?;
+            return Err(if consumed < 29 {
+                Error::Truncated
+            } else {
+                Error::Invalid(crate::Fault::CavlcLevelPrefix)
+            });
         }
+        bits.skip(prefix as usize + 1)?;
         let suffix_bits = if prefix == 14 && suffix == 0 {
             4
         } else if prefix >= 15 {

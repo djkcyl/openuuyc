@@ -1,8 +1,7 @@
 //! Logged-in device presence and account push ownership, shared by GUI and CLI.
 //! Network retry policy is independent of account/device revocation.
 //!
-//! 2026-09-09 注记：本机"在线房间"保留（设备在线状态基础），但不开放被控：
-//! 被控权限开关（device/controllable）已从界面移除，接口与逆向记录留档。
+//! The same authenticated room now also owns explicitly enabled desktop sharing.
 
 use crate::{
     api::ApiFailure,
@@ -99,7 +98,7 @@ async fn run_presence(
         // 39C5B0: a device that has never been controlled sends -1.
         let request = tokio::select! {
             _ = task_cancel.cancelled() => return Ok(()),
-            result = client.create_host_room(-1) => result,
+            result = client.create_host_room(client.host.last_controlled_interval()) => result,
         };
         let room = match request {
             Ok(room) => {
@@ -164,7 +163,7 @@ async fn run_presence(
                 let mut socket_state = session.socket_state();
                 let mut state_open = true;
                 let (shutdown, shutdown_receiver) = oneshot::channel();
-                let alive = session.keep_alive(shutdown_receiver, None, None);
+                let alive = session.keep_alive_host(shutdown_receiver, client.clone());
                 tokio::pin!(alive);
                 loop {
                     tokio::select! {

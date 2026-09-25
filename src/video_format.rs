@@ -31,7 +31,7 @@ pub(crate) fn parse_annex_b_format(codec: VideoCodec, data: &[u8]) -> Option<Vid
         })
 }
 
-fn annex_b_units(data: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn annex_b_units(data: &[u8]) -> Vec<&[u8]> {
     let mut marks = Vec::new();
     let mut index = 0usize;
     while index + 3 <= data.len() {

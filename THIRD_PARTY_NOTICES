@@ -28,6 +28,21 @@ service access require separate assessment.
 
 2. Video decoding and platform adaptation
 
+Windows NVENC hardware encoder ABI bindings:
+vendor/nvenc-sys/ retains the NVENC-only Windows bindings, GUIDs, version
+constants and original layout tests from nvidia-video-codec-sdk 0.4.0 (MIT).
+Local adaptations and source are described in that directory's README.md;
+wrapper and NVIDIA header notices are retained alongside it. No NVDEC or
+CUDA implementation is included in this component.
+Source: https://github.com/ViliamVadocz/nvidia-video-codec-sdk
+
+Sender-side Google Congestion Control algorithm core:
+vendor/goog_cc/ is based on goog_cc 0.1.4, a Rust port of WebRTC algorithms.
+The original BSD-style LICENSE, PATENTS, AUTHORS and library tests are retained.
+UU-specific transport feedback, pacing and protection policies are integrated
+by OpenUUYC; the upstream default configuration is not the UU behavior contract.
+Source: https://github.com/kixelated/goog_cc
+
 FFmpeg-derived Rust decoding and DXVA parameter implementations:
 LGPL-2.1-or-later.
 Principal locations: src/decoder/h264-core/ and
@@ -126,3 +141,35 @@ This file and the root LICENSE must not rewrite their grants, conditions,
 or disclaimers. Missing provenance or attribution should be corrected
 with supporting evidence and notices; unlisted material must not be
 presumed original to this project.
+
+Protocol interoperability parameter provenance:
+vendor/amf-sys contains Rust bindings and retained AMD AMF 1.5.2 public
+headers under their original MIT notices. See vendor/amf-sys/README.md.
+vendor/vpl-sys contains public Intel oneVPL bindings and the static driver
+dispatcher, pinned to 674d015bcb294bc39fa276e99a652ea045423e82, under MIT.
+Its original LICENSE is retained in vendor/vpl-sys/dispatcher/LICENSE.
+No AMD/Intel encoder runtime binaries or official UU shader binaries are
+distributed by these additions; the actual encoder is the installed driver.
+
+The bitrate budget table in src/host/parameters.rs and the repair-count tables
+src/host/fec-high-rtt.bin and fec-low-rtt.bin contain interoperability parameters
+obtained from the currently analyzed UU V4.7.3 SDK distributed
+with 4.41.2.2602 (VA 180FA0D70, 18107EEE0 and 181085BE0). See the settings and sender analysis for
+dimensions and selection rules. These parameters are not claimed as
+original project material or covered by the goog_cc/NVENC binding licenses.
+
+
+Rust H.264 desktop encoder
+
+The realtime encoder in src/decoder/h264-core shares the existing LGPL-2.1-or-later
+FFmpeg-derived interpolation, prediction, deblocking and CAVLC tables with the
+decoder. Selected forward/inverse transform primitives use the already declared
+oxideav-h264 0.1.8 dependency. Frame decisions, motion search, rate control and
+bitstream writing are implemented in the project. OpenH264 is not linked.
+
+The specialized Rust encoder's GOM rate-control formulas, screen-change thresholds,
+scroll detection, mode costs, quantization tables, residual decimation, prediction and motion-search
+organization are adapted from Cisco OpenH264 source and verified
+against UU's active producer/consumer paths. The original BSD-2-Clause notice is
+retained in licenses/openh264-algorithms.txt. This attribution does not add the
+OpenH264 C/C++ library or bindings to the application.

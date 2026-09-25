@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-//! Platform-independent, byte-plane H.264 decoding implementation.
+//! Platform-independent H.264 decoding and low-delay desktop encoding.
 //! The Windows client uses this core for all software video decoding.
 #![deny(unsafe_code)]
 
@@ -8,6 +8,7 @@ pub mod cabac;
 mod cavlc;
 mod dpb;
 pub mod dsp;
+pub mod encoder;
 mod entropy;
 mod fault;
 mod headers;

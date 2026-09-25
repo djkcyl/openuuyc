@@ -9,6 +9,8 @@ pub mod transform;
 #[cfg(all(target_arch = "x86_64", not(feature = "scalar-dsp")))]
 #[allow(unsafe_code)]
 mod x86;
+#[cfg(all(target_arch = "x86_64", not(feature = "scalar-dsp")))]
+pub(crate) use x86::transpose8;
 
 pub struct Block<'a> {
     data: &'a mut [u8],
@@ -121,17 +123,12 @@ pub(crate) fn avg(a: u8, b: u8) -> u8 {
     ((a as u16 + b as u16 + 1) >> 1) as u8
 }
 
-pub(crate) fn interleave_chroma(u: &[u8], v: &[u8], dst: &mut [u8]) {
+/// Append interleaved chroma directly to reserved output storage. A trusted
+/// fixed-size iterator lets LLVM vectorize without pre-zeroing that storage.
+#[inline]
+pub(crate) fn append_chroma(u: &[u8], v: &[u8], dst: &mut Vec<u8>) {
     assert_eq!(u.len(), v.len());
-    assert_eq!(dst.len(), u.len() * 2);
-    #[cfg(all(target_arch = "x86_64", not(feature = "scalar-dsp")))]
-    {
-        x86::interleave_chroma(u, v, dst);
-    }
-    #[cfg(not(all(target_arch = "x86_64", not(feature = "scalar-dsp"))))]
-    for ((pixel, &u), &v) in dst.chunks_exact_mut(2).zip(u).zip(v) {
-        pixel.copy_from_slice(&[u, v]);
-    }
+    dst.extend(u.iter().zip(v).flat_map(|(&u, &v)| [u, v]));
 }
 
 #[cfg(test)]
@@ -142,8 +139,10 @@ mod tests {
         for length in [0, 1, 2, 7, 15, 16, 17, 31, 33, 316] {
             let u: Vec<_> = (0..length).map(|x| (x * 3) as u8).collect();
             let v: Vec<_> = (0..length).map(|x| (x * 7 + 11) as u8).collect();
-            let mut dst = vec![91; length * 2 + 6];
-            interleave_chroma(&u, &v, &mut dst[3..length * 2 + 3]);
+            let mut dst = vec![91; 3];
+            append_chroma(&u, &v, &mut dst);
+            assert_eq!(dst.len(), length * 2 + 3);
+            dst.extend_from_slice(&[91; 3]);
             assert_eq!(&dst[..3], &[91; 3]);
             assert_eq!(&dst[length * 2 + 3..], &[91; 3]);
             for i in 0..length {

@@ -27,6 +27,9 @@ dunce = "1.0"
 egui = { version = "0.36.1", default-features = false, features = ["bytemuck", "default_fonts"] }
 flate2 = "1.1"
 futures-util = "0.3.34"
+goog_cc = { path = "vendor/goog_cc" }
+openuuyc-amf-sys = { path = "vendor/amf-sys" }
+openuuyc-vpl-sys = { path = "vendor/vpl-sys" }
 hmac = "0.12.1"
 hyper = { version = "1.10.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
@@ -67,6 +70,7 @@ embed-resource = "3.0.11"
 windows-core = "0.62.2"
 openuuyc-plugin-api = { path = "plugins/sdk" }
 libloading = "0.8.9"
+openuuyc-nvenc-sys = { path = "vendor/nvenc-sys" }
 openuuyc-h264 = { path = "src/decoder/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
 oxideav-h265 = { version = "=0.0.10" }
@@ -78,6 +82,7 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
     "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
@@ -142,3 +147,5 @@ overflow-checks = false
 
 [profile.dev.package.openuuyc-h264]
 opt-level = 3
+
+

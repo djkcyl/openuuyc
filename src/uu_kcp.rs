@@ -58,6 +58,7 @@ struct ControlState {
 }
 
 type SendGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+pub(crate) type ControlReceiver = Arc<dyn Fn(u16, &[u8]) -> Result<()> + Send + Sync>;
 
 enum WorkerCommand {
     Send {
@@ -93,6 +94,24 @@ impl UuKcpControl {
         transport: Arc<RTCSctpTransport>,
         version: u8,
         stream_control: StreamControlHandle,
+    ) -> Result<()> {
+        self.start_receiver(
+            transport,
+            version,
+            Arc::new(move |_, message| {
+                stream_control.handle_protocol_message(
+                    message,
+                    crate::stream_control::PbMessageSource::Control,
+                )
+            }),
+        )
+    }
+
+    pub(crate) fn start_receiver(
+        &self,
+        transport: Arc<RTCSctpTransport>,
+        version: u8,
+        stream_control: ControlReceiver,
     ) -> Result<()> {
         ensure!(version == 2, "unsupported UU mixed-KCP version {version}");
         let mut state = lock(&self.state);
@@ -222,6 +241,19 @@ impl UuKcpControl {
         if let Some(task) = task {
             let _ = task.await;
         }
+        lock(&self.control_streams).clear();
+    }
+
+    // Also cancel from owners' Drop paths, where awaiting the task is impossible.
+    pub(crate) fn stop(&self) {
+        let mut state = lock(&self.state);
+        state.generation = state.generation.wrapping_add(1);
+        state.version = 0;
+        state.sender.take();
+        if let Some(cancel) = state.cancel.take() {
+            let _ = cancel.send(());
+        }
+        lock(&self.control_streams).clear();
     }
 }
 
@@ -280,7 +312,7 @@ async fn run_worker(
     endpoint: Arc<Endpoint>,
     version: u8,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
-    stream_control: StreamControlHandle,
+    stream_control: ControlReceiver,
     control_streams: Arc<StdMutex<HashSet<u16>>>,
 ) -> Result<()> {
     let output_packets = Arc::new(StdMutex::new(VecDeque::new()));
@@ -534,7 +566,7 @@ impl Worker {
     fn receive_datagram(
         &mut self,
         datagram: &[u8],
-        stream_control: &StreamControlHandle,
+        stream_control: &ControlReceiver,
     ) -> Result<()> {
         tracing::trace!(
             command = datagram.get(8).copied().unwrap_or_default(),
@@ -610,7 +642,7 @@ impl Worker {
         &mut self,
         wire: &[u8],
         recovered_by_fec: bool,
-        stream_control: &StreamControlHandle,
+        stream_control: &ControlReceiver,
     ) -> Result<()> {
         ensure!(
             wire.len() >= UU_KCP_HEADER,
@@ -665,7 +697,7 @@ impl Worker {
         result
     }
 
-    fn drain_messages(&mut self, stream_control: &StreamControlHandle) -> Result<()> {
+    fn drain_messages(&mut self, stream_control: &ControlReceiver) -> Result<()> {
         while let Ok(size) = self.kcp.peeksize() {
             let mut message = vec![0_u8; size];
             let received = self
@@ -688,9 +720,7 @@ impl Worker {
                 );
                 continue;
             }
-            if let Err(error) = stream_control
-                .handle_protocol_message(&message, crate::stream_control::PbMessageSource::Control)
-            {
+            if let Err(error) = stream_control(stream_id, &message) {
                 // F91D10 discards an invalid application message, without
                 // interrupting delivery of subsequent transport messages.
                 tracing::warn!(%error, stream_id, bytes = message.len(), "invalid UU CONTROL protobuf from mixed-KCP");

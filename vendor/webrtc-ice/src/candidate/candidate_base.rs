@@ -513,6 +513,15 @@ impl Candidate for CandidateBase {
         )
         .as_str();
 
+        let username = self.credentials().username;
+        if !username.is_empty() {
+            val += format!(" ufrag {username}").as_str();
+        }
+        let relay_protocol = self.relay_protocol();
+        if self.candidate_type() == CandidateType::Relay && !relay_protocol.is_empty() {
+            val += format!(" relay-protocol {relay_protocol}").as_str();
+        }
+
         val
     }
 
@@ -719,6 +728,8 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
     let mut generation = 0;
     let mut network_id = 0;
     let mut network_cost = None;
+    let mut relay_protocol = String::new();
+    let mut username_fragment = String::new();
 
     if split.len() > 8 {
         if (split.len() - 8) % 2 != 0 {
@@ -736,6 +747,8 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
                 "generation" => generation = split[index + 1].parse()?,
                 "network-id" => network_id = split[index + 1].parse()?,
                 "network-cost" => network_cost = Some(split[index + 1].parse()?),
+                "relay-protocol" => split[index + 1].clone_into(&mut relay_protocol),
+                "ufrag" => split[index + 1].clone_into(&mut username_fragment),
                 _ => {}
             }
             index += 2;
@@ -755,6 +768,11 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
                     generation,
                     network_id,
                     network_cost,
+                    relay_protocol,
+                    credentials: IceCredentials {
+                        username: username_fragment,
+                        password: String::new(),
+                    },
                     ..CandidateBaseConfig::default()
                 },
                 tcp_type,
@@ -773,6 +791,11 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
                     generation,
                     network_id,
                     network_cost,
+                    relay_protocol,
+                    credentials: IceCredentials {
+                        username: username_fragment,
+                        password: String::new(),
+                    },
                     ..CandidateBaseConfig::default()
                 },
                 rel_addr,
@@ -792,6 +815,11 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
                     generation,
                     network_id,
                     network_cost,
+                    relay_protocol,
+                    credentials: IceCredentials {
+                        username: username_fragment,
+                        password: String::new(),
+                    },
                     ..CandidateBaseConfig::default()
                 },
                 rel_addr,
@@ -812,6 +840,11 @@ pub fn unmarshal_candidate(raw: &str) -> Result<impl Candidate> {
                     generation,
                     network_id,
                     network_cost,
+                    relay_protocol,
+                    credentials: IceCredentials {
+                        username: username_fragment,
+                        password: String::new(),
+                    },
                     ..CandidateBaseConfig::default()
                 },
                 rel_addr,

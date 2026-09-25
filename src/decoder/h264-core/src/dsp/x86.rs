@@ -4,26 +4,6 @@
 // Only this module contains unsafe intrinsics. x86_64 guarantees SSE2.
 use super::Block;
 use std::arch::x86_64::*;
-/// Caller supplies equal U/V spans and exactly twice as many destination
-/// bytes. Full vector chunks and the scalar tail never access row padding.
-pub(super) fn interleave_chroma(u: &[u8], v: &[u8], dst: &mut [u8]) {
-    let mut x = 0;
-    unsafe {
-        while x + 16 <= u.len() {
-            let a = _mm_loadu_si128(u.as_ptr().add(x).cast());
-            let b = _mm_loadu_si128(v.as_ptr().add(x).cast());
-            _mm_storeu_si128(dst.as_mut_ptr().add(x * 2).cast(), _mm_unpacklo_epi8(a, b));
-            _mm_storeu_si128(
-                dst.as_mut_ptr().add(x * 2 + 16).cast(),
-                _mm_unpackhi_epi8(a, b),
-            );
-            x += 16;
-        }
-    }
-    for ((pixel, &u), &v) in dst[x * 2..].chunks_exact_mut(2).zip(&u[x..]).zip(&v[x..]) {
-        pixel.copy_from_slice(&[u, v]);
-    }
-}
 mod deblock;
 mod idct;
 mod pixel;
@@ -442,7 +422,7 @@ pub(super) fn luma(
     };
 }
 #[inline]
-unsafe fn transpose8(r: [__m128i; 8]) -> [__m128i; 4] {
+pub(crate) unsafe fn transpose8(r: [__m128i; 8]) -> [__m128i; 4] {
     unsafe {
         let a = _mm_unpacklo_epi8(r[0], r[1]);
         let b = _mm_unpacklo_epi8(r[2], r[3]);

@@ -34,6 +34,7 @@ pub(crate) enum RestorationStage {
 }
 
 pub struct AuthenticatedClient {
+    pub(crate) host: crate::host::Handle,
     api: Mutex<Option<NrdApi>>,
     session: LoginSession,
     device: DeviceHandle,
@@ -86,6 +87,7 @@ impl AuthenticatedClient {
         };
         let account_name = Mutex::new(session.nickname().to_owned());
         Ok(Self {
+            host: crate::host::Handle::default(),
             api: Mutex::new(Some(api)),
             session,
             device,
@@ -139,6 +141,7 @@ impl AuthenticatedClient {
     /// Retire this generation before asynchronous room teardown. Late responses
     /// cannot restore its headers or deliver authenticated results.
     pub fn retire(&self) {
+        self.host.stop();
         let mut api = self.api.lock().unwrap_or_else(|error| error.into_inner());
         self.ended.cancel();
         api.take();
@@ -600,6 +603,7 @@ impl AuthenticatedClient {
 
 impl Drop for AuthenticatedClient {
     fn drop(&mut self) {
+        self.host.stop();
         self.ended.cancel();
     }
 }

@@ -1670,7 +1670,7 @@ impl RTCPeerConnection {
         };
 
         let ice_candidate = if !candidate_value.is_empty() {
-            let username_fragment = candidate.username_fragment.clone();
+            let username_fragment = candidate.effective_username_fragment();
             let parsed_candidate: Arc<dyn Candidate + Send + Sync> =
                 Arc::new(unmarshal_candidate(candidate_value)?);
 

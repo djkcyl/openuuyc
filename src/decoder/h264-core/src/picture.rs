@@ -191,16 +191,11 @@ impl Picture {
                 }
             }
         } else {
-            out.resize(size, 0);
-            for (row, y) in (c.top / 2..(c.top + c.height) / 2).enumerate() {
+            for y in c.top / 2..(c.top + c.height) / 2 {
                 let u = self.planes[1].row(y);
                 let v = self.planes[2].row(y);
                 let range = c.left / 2..(c.left + c.width) / 2;
-                crate::dsp::interleave_chroma(
-                    &u[range.clone()],
-                    &v[range],
-                    &mut out[n + row * c.width..n + (row + 1) * c.width],
-                );
+                crate::dsp::append_chroma(&u[range.clone()], &v[range], out);
             }
         }
         Ok(())

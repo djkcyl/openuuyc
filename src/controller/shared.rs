@@ -9,6 +9,7 @@ struct End {
     message: String,
     signal: Option<SignalFailure>,
 }
+
 pub(super) struct Session {
     pub peer: Arc<NativePeer>,
     forwarder: Mutex<Option<RtpForwarder>>,
@@ -51,6 +52,15 @@ pub(super) fn connection_gate(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     gates.insert(key.into(), Arc::downgrade(&gate));
     gate
+}
+pub(super) async fn acquire_connection(
+    key: &str,
+    cancel: &CancellationToken,
+) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    cancellable(cancel, async {
+        Ok(connection_gate(key).lock_owned().await)
+    })
+    .await
 }
 fn jobs() -> &'static Mutex<Vec<(Weak<Session>, CancellationToken)>> {
     static JOBS: OnceLock<Mutex<Vec<(Weak<Session>, CancellationToken)>>> = OnceLock::new();

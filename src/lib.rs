@@ -26,6 +26,7 @@ mod display_hdr;
 mod feature_ability;
 mod file_transfer;
 mod flexfec;
+mod host;
 pub mod logging;
 pub mod login;
 pub mod media;

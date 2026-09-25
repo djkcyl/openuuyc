@@ -643,6 +643,25 @@ pub(crate) async fn add_transceiver_sdp(
                         ),
                     );
                 }
+                if encoding.fec.ssrc != 0
+                    && media.attributes.iter().any(|a| {
+                        a.key == "rtpmap"
+                            && a.value
+                                .as_deref()
+                                .is_some_and(|v| v.to_ascii_lowercase().contains("rs-fec-cm256/"))
+                    })
+                {
+                    media = media.with_media_source(
+                        encoding.fec.ssrc,
+                        track.stream_id().to_owned(),
+                        track.stream_id().to_owned(),
+                        track.id().to_owned(),
+                    );
+                    media = media.with_value_attribute(
+                        ATTR_KEY_SSRCGROUP.to_owned(),
+                        format!("FEC-FR-RS {} {}", encoding.ssrc, encoding.fec.ssrc),
+                    );
+                }
             }
 
             if send_parameters.encodings.len() > 1 {

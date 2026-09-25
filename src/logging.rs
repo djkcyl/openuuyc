@@ -72,6 +72,7 @@ modules! {
     ("auth", "登录与凭据", false, ["openuuyc::auth", "openuuyc::login", "openuuyc::session_restore"]),
     ("api", "账号接口", false, ["openuuyc::api", "openuuyc::client", "openuuyc::nrd_http", "openuuyc::assist"]),
     ("presence", "在线状态", false, ["openuuyc::presence", "openuuyc::device_session"]),
+    ("host", "本机画面共享", false, ["openuuyc::host"]),
     ("signal", "信令与协商", false, ["openuuyc::signal"]),
     ("rtc", "实时传输", false, ["openuuyc::rtc", "openuuyc::uu_kcp"]),
     ("recovery", "丢包恢复", false, ["openuuyc::official_receiver", "openuuyc::nack_audit", "openuuyc::replay_recovery", "openuuyc::rsfec", "openuuyc::ulpfec", "openuuyc::flexfec", "openuuyc::xor_fec"]),

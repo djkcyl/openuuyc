@@ -133,49 +133,58 @@ impl ResolvedConnection {
         retries: &mut u32,
     ) -> Result<ControllerConnection> {
         let key = shared::key(&self.controller_device_id, &self.target_device_id);
-        let _gate = shared::connection_gate(&key).lock_owned().await;
+        let _gate = shared::acquire_connection(&key, cancel).await?;
         if self.assist.is_none()
             && let Some(session) = shared::get(&key)
         {
             self.takeover = None;
             let mut connection = ControllerConnection::from_shared(session, self.profile, true)?;
-            let handle = connection.stream_control_handle();
-            let store = self.client.viewing_settings_store(&self.target_device_id)?;
-            if let Some(saved) = store.load().await? {
-                let preferences = crate::stream_control::StreamControlPreferences::from_saved(
-                    saved,
-                    self.profile,
-                );
-                if !handle.snapshot().ready {
-                    let _ = handle.restore_preferences(preferences);
+            let session = Arc::clone(&connection.forwarder.session);
+            let setup = async {
+                let handle = connection.stream_control_handle();
+                let store = self.client.viewing_settings_store(&self.target_device_id)?;
+                if let Some(saved) = store.load().await? {
+                    let preferences = crate::stream_control::StreamControlPreferences::from_saved(
+                        saved,
+                        self.profile,
+                    );
+                    if !handle.snapshot().ready {
+                        let _ = handle.restore_preferences(preferences);
+                    }
                 }
+                let mut audio = store
+                    .load_audio()
+                    .await?
+                    .unwrap_or(crate::audio::AudioSettings {
+                        volume: 100,
+                        muted: false,
+                    });
+                audio.muted |= self.profile.muted;
+                handle.audio().set_settings(audio);
+                handle.set_feature_policy(
+                    self.client
+                        .feature_catalog()
+                        .policy(self.target_platform, &self.target_version),
+                );
+                if self.target_platform == 1 {
+                    handle.set_remote_upgrade(crate::remote_upgrade::RemoteUpgrade::new(
+                        Arc::clone(&self.client),
+                        self.target_device_id.clone(),
+                        self.summary.alias.clone(),
+                        self.target_version.clone(),
+                        cancel,
+                    ));
+                }
+                connection.preference_writer = Some(store.clone().bind(handle.clone()));
+                connection.audio_preference_writer = Some(store.bind_audio(handle));
+                connection.activate_viewing().await
+            };
+            if let Err(error) =
+                cancellable(cancel, await_media_startup(session.ended(), setup)).await
+            {
+                drop(session);
+                return Err(connection.close_after_startup_error(error).await);
             }
-            let mut audio = store
-                .load_audio()
-                .await?
-                .unwrap_or(crate::audio::AudioSettings {
-                    volume: 100,
-                    muted: false,
-                });
-            audio.muted |= self.profile.muted;
-            handle.audio().set_settings(audio);
-            handle.set_feature_policy(
-                self.client
-                    .feature_catalog()
-                    .policy(self.target_platform, &self.target_version),
-            );
-            if self.target_platform == 1 {
-                handle.set_remote_upgrade(crate::remote_upgrade::RemoteUpgrade::new(
-                    Arc::clone(&self.client),
-                    self.target_device_id.clone(),
-                    self.summary.alias.clone(),
-                    self.target_version.clone(),
-                    cancel,
-                ));
-            }
-            connection.preference_writer = Some(store.clone().bind(handle.clone()));
-            connection.audio_preference_writer = Some(store.bind_audio(handle));
-            connection.activate_viewing().await?;
             return Ok(connection);
         }
         self.client.schedule_feature_refresh(true);
@@ -855,7 +864,7 @@ impl ControllerConnection {
         purpose: crate::control::ControlPurpose,
     ) -> Result<Self> {
         let key = shared::key(&client.device_id(), &device.device_id);
-        let _gate = shared::connection_gate(&key).lock_owned().await;
+        let _gate = shared::acquire_connection(&key, cancel).await?;
         let display = detect_local_display().unwrap_or(LocalDisplayInfo::FALLBACK);
         let mut profile = options.resolve(display)?;
         if let Ok(store) = client.viewing_settings_store(&device.device_id)
@@ -1408,14 +1417,19 @@ impl ControllerConnection {
     }
 
     pub async fn close(mut self) -> Result<()> {
-        if self.forwarder.viewing && Arc::strong_count(&self.forwarder.session) > 1 {
+        if self.forwarder.viewing {
             let handle = self.stream_control_handle();
             handle.mouse().disable();
             handle.audio().suspend();
-            for screen in handle.snapshot().screens {
-                let _ = handle.set_screen_capture(screen.id, false).await;
-            }
+            // Local capture and clipboard permissions end before any network
+            // wait. A shared file/port session must not keep a closing viewer's
+            // microphone alive while screen-stop messages are backpressured.
             handle.set_viewing_enabled(false);
+            if Arc::strong_count(&self.forwarder.session) > 1 {
+                for screen in handle.snapshot().screens {
+                    let _ = handle.set_screen_capture(screen.id, false).await;
+                }
+            }
         }
         let result = if Arc::strong_count(&self.forwarder.session) == 1 {
             self.forwarder.session.request_close();

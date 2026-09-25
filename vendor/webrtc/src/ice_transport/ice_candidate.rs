@@ -79,7 +79,10 @@ impl From<&Arc<dyn Candidate + Send + Sync>> for RTCIceCandidate {
             network_cost: c.network_cost(),
             network_key: c.network_key(),
             generation: c.generation(),
-            username_fragment: None,
+            username_fragment: {
+                let username = c.credentials().username;
+                (!username.is_empty()).then_some(username)
+            },
         }
     }
 }
@@ -183,6 +186,23 @@ pub struct RTCIceCandidateInit {
     #[serde(rename = "sdpMLineIndex")]
     pub sdp_mline_index: Option<u16>,
     pub username_fragment: Option<String>,
+}
+
+impl RTCIceCandidateInit {
+    /// UU trickle candidates can carry their generation credential in the
+    /// candidate string even when the JSON usernameFragment member is absent.
+    pub fn effective_username_fragment(&self) -> Option<String> {
+        if let Some(fragment) = self.username_fragment.as_ref().filter(|f| !f.is_empty()) {
+            return Some(fragment.clone());
+        }
+        let mut extensions = self.candidate.split_whitespace().skip(8);
+        while let (Some(key), Some(value)) = (extensions.next(), extensions.next()) {
+            if key == "ufrag" {
+                return Some(value.to_owned());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

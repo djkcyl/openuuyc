@@ -175,6 +175,12 @@ impl RTCDtlsTransport {
         remote_certificate.clone()
     }
 
+    /// Authentication bytes appended to an RTP packet by the negotiated SRTP profile.
+    pub async fn rtp_authentication_overhead(&self) -> usize {
+        let profile = self.srtp_protection_profile.lock().await;
+        profile.rtp_auth_tag_len() + profile.aead_auth_tag_len()
+    }
+
     pub(crate) async fn start_srtp(&self) -> Result<()> {
         let profile = {
             let srtp_protection_profile = self.srtp_protection_profile.lock().await;
@@ -278,6 +284,12 @@ impl RTCDtlsTransport {
         srtp_session.clone()
     }
 
+    /// Open a bounded authenticated RTCP stream (including transport-wide SSRC 0).
+    /// Media senders normally use their own SSRC; a transport controller owns 0.
+    pub async fn rtcp_read_stream(&self, ssrc: u32) -> Option<Arc<srtp::stream::Stream>> {
+        Some(self.get_srtcp_session().await?.open(ssrc).await)
+    }
+
     pub(crate) async fn get_srtcp_session(&self) -> Option<Arc<Session>> {
         let srtcp_session = self.srtcp_session.lock().await;
         srtcp_session.clone()
@@ -301,8 +313,10 @@ impl RTCDtlsTransport {
             _ => {}
         };
 
-        // Remote was auto and no explicit role was configured via SettingEngine
-        if self.ice_transport.role().await == RTCIceRole::Controlling {
+        // Use the original offer/answer assignment, consistent with create_answer.
+        // ICE role conflicts may change the current controlling agent before
+        // DTLS starts; they do not rewrite the negotiated a=setup attribute.
+        if self.ice_transport.negotiation_role().await == RTCIceRole::Controlling {
             return DTLSRole::Server;
         }
 

@@ -42,6 +42,7 @@ pub(crate) struct TrackEncoding {
     pub(crate) ssrc: SSRC,
 
     pub(crate) rtx: Option<RtxEncoding>,
+    pub(crate) fec: Option<RtxEncoding>,
 }
 
 pub(crate) struct RtxEncoding {
@@ -73,6 +74,7 @@ pub struct RTCRtpSender {
     pub(crate) payload_type: PayloadType,
     receive_mtu: usize,
     enable_rtx: bool,
+    enable_rsfec: bool,
 
     /// a transceiver sender since we can just check the
     /// transceiver negotiation status
@@ -151,6 +153,7 @@ impl RTCRtpSender {
             payload_type: 0,
             receive_mtu: setting_engine.get_receive_mtu(),
             enable_rtx: setting_engine.enable_sender_rtx,
+            enable_rsfec: setting_engine.enable_sender_rsfec,
 
             negotiated: AtomicBool::new(false),
 
@@ -274,6 +277,36 @@ impl RTCRtpSender {
         };
 
         let write_stream = Arc::new(InterceptorToTrackLocalWriter::new(self.paused.clone()));
+        let fec = if self.enable_rsfec
+            && self
+                .media_engine
+                .get_codecs_by_kind(track.kind())
+                .iter()
+                .any(|c| {
+                    c.capability
+                        .mime_type
+                        .eq_ignore_ascii_case("video/rs-fec-cm256")
+                }) {
+            let ssrc = rand::random::<u32>();
+            let srtp_stream = Arc::new(SrtpWriterFuture {
+                closed: AtomicBool::new(false),
+                ssrc,
+                rtp_sender: Arc::downgrade(&self.internal),
+                rtp_transport: Arc::clone(&self.transport),
+                rtcp_read_stream: Mutex::new(None),
+                rtp_write_session: Mutex::new(None),
+                seq_trans: Arc::new(SequenceTransformer::new()),
+            });
+            let reader = srtp_stream.clone() as Arc<dyn RTCPReader + Send + Sync>;
+            Some(RtxEncoding {
+                srtp_stream,
+                rtcp_interceptor: self.interceptor.bind_rtcp_reader(reader).await,
+                stream_info: Mutex::new(StreamInfo::default()),
+                ssrc,
+            })
+        } else {
+            None
+        };
         let context = TrackLocalContext {
             id: self.id.clone(),
             params: super::RTCRtpParameters::default(),
@@ -290,6 +323,7 @@ impl RTCRtpSender {
             context,
             ssrc,
             rtx,
+            fec,
         };
 
         track_encodings.push(encoding);
@@ -337,7 +371,9 @@ impl RTCRtpSender {
                     rtx: RTCRtpRtxParameters {
                         ssrc: e.rtx.as_ref().map(|e| e.ssrc).unwrap_or_default(),
                     },
-                    fec: RTCRtpRtxParameters::default(),
+                    fec: RTCRtpRtxParameters {
+                        ssrc: e.fec.as_ref().map(|e| e.ssrc).unwrap_or_default(),
+                    },
                 });
             }
 
@@ -438,15 +474,36 @@ impl RTCRtpSender {
                 }
             }
         } else {
-            if self.has_sent() {
-                for encoding in track_encodings.drain(..) {
-                    encoding.track.unbind(&encoding.context).await?;
+            // Drain only after taking ownership of every stream. Stopping used
+            // to clear this list before auxiliary SRTP/RTCP cleanup could run.
+            let mut first_error = None;
+            for encoding in track_encodings.drain(..) {
+                if self.has_sent() {
+                    if let Err(error) = encoding.track.unbind(&encoding.context).await {
+                        first_error.get_or_insert(error);
+                    }
+                    self.interceptor
+                        .unbind_local_stream(&encoding.stream_info)
+                        .await;
                 }
-            } else {
-                track_encodings.clear();
+                if let Err(error) = encoding.srtp_stream.close().await {
+                    first_error.get_or_insert(error);
+                }
+                for auxiliary in [encoding.rtx.as_ref(), encoding.fec.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if self.has_sent() {
+                        self.interceptor
+                            .unbind_local_stream(&*auxiliary.stream_info.lock().await)
+                            .await;
+                    }
+                    if let Err(error) = auxiliary.srtp_stream.close().await {
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
-
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         }
     }
 
@@ -525,6 +582,31 @@ impl RTCRtpSender {
 
                 self.receive_rtcp_for_rtx(rtx.rtcp_interceptor.clone());
             }
+            if let (Some(fec), Some(codec)) = (
+                &encoding.fec,
+                parameters.rtp_parameters.codecs.iter().find(|c| {
+                    c.capability
+                        .mime_type
+                        .eq_ignore_ascii_case("video/rs-fec-cm256")
+                }),
+            ) {
+                let info = create_stream_info(
+                    self.id.clone(),
+                    parameters.encodings[idx].fec.ssrc,
+                    codec.payload_type,
+                    codec.capability.clone(),
+                    &parameters.rtp_parameters.header_extensions,
+                    Some(AssociatedStreamInfo {
+                        ssrc: parameters.encodings[idx].ssrc,
+                        payload_type: encoding.stream_info.payload_type,
+                    }),
+                );
+                self.interceptor
+                    .bind_local_stream(&info, fec.srtp_stream.clone())
+                    .await;
+                *fec.stream_info.lock().await = info;
+                self.receive_rtcp_for_rtx(fec.rtcp_interceptor.clone());
+            }
         }
 
         self.send_called.send_replace(true);
@@ -545,7 +627,7 @@ impl RTCRtpSender {
             while !stop_called_signal.load(Ordering::SeqCst) {
                 select! {
                     r = rtcp_reader.read(&mut b, &attrs) => {
-                        if r.is_err() {
+                        if r.is_err() && !matches!(r, Err(interceptor::Error::Rtcp(_))) {
                             break
                         }
                     },
@@ -563,29 +645,7 @@ impl RTCRtpSender {
         self.stop_called_signal.store(true, Ordering::SeqCst);
         self.stop_called_tx.notify_waiters();
 
-        if !self.has_sent() {
-            return Ok(());
-        }
-
-        self.replace_track(None).await?;
-
-        let track_encodings = self.track_encodings.lock().await;
-        for encoding in track_encodings.iter() {
-            self.interceptor
-                .unbind_local_stream(&encoding.stream_info)
-                .await;
-
-            encoding.srtp_stream.close().await?;
-
-            if let Some(rtx) = &encoding.rtx {
-                let rtx_stream_info = rtx.stream_info.lock().await;
-                self.interceptor.unbind_local_stream(&rtx_stream_info).await;
-
-                rtx.srtp_stream.close().await?;
-            }
-        }
-
-        Ok(())
+        self.replace_track(None).await
     }
 
     /// read reads incoming RTCP for this RTPReceiver

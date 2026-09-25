@@ -144,6 +144,7 @@ struct DeviceCenterApp {
     local_display: LocalDisplayInfo,
     media: ConnectionMediaOptions,
     presence: PresenceState,
+    host: Option<crate::host::Handle>,
     status: StatusMessage,
     refreshed_at: Option<Instant>,
     refresh_pending: bool,
@@ -198,6 +199,7 @@ impl DeviceCenterApp {
             local_display,
             media,
             presence: PresenceState::Connecting,
+            host: None,
             status: display_warning.map_or_else(
                 || StatusMessage::info("正在读取设备并建立本机在线状态"),
                 StatusMessage::warning,
@@ -259,6 +261,11 @@ impl DeviceCenterApp {
                     }
                 }
                 GuiEvent::Presence(presence) => self.presence = presence,
+                GuiEvent::Host(generation, host) => {
+                    if generation == self.login_generation {
+                        self.host = Some(host);
+                    }
+                }
                 GuiEvent::PowerDispatched(generation, id, action) => {
                     if generation == self.login_generation
                         && self.mutation_pending
@@ -1223,6 +1230,7 @@ enum MutationOutcome {
 }
 
 enum GuiEvent {
+    Host(u64, crate::host::Handle),
     Viewer(
         u64,
         String,
@@ -2000,6 +2008,10 @@ async fn gui_worker_loop(
                 )));
             }
             if host_signal.is_none() && !presence_stopped {
+                let _ = events.send(GuiEvent::Host(
+                    catalog_generation,
+                    active_client.host.clone(),
+                ));
                 host_signal = Some(ActivePresence::start(Arc::clone(active_client)));
             }
         }

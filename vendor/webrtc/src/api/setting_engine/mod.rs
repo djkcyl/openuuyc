@@ -108,6 +108,7 @@ pub struct SettingEngine {
     pub(crate) receive_mtu: usize,
     pub(crate) mid_generator: Option<Arc<dyn Fn(isize) -> String + Send + Sync>>,
     pub(crate) enable_sender_rtx: bool,
+    pub(crate) enable_sender_rsfec: bool,
     /// Determines the max size of any message that may be sent through an SCTP transport.
     pub(crate) sctp_max_message_size_can_send: SctpMaxMessageSize,
     pub(crate) data_channel_receive_limit: Option<usize>,
@@ -403,6 +404,10 @@ impl SettingEngine {
     /// codec is configured.
     pub fn enable_sender_rtx(&mut self, is_enabled: bool) {
         self.enable_sender_rtx = is_enabled;
+    }
+    /// Allocate an auxiliary RS-FEC sender when that codec is negotiated.
+    pub fn enable_sender_rsfec(&mut self, is_enabled: bool) {
+        self.enable_sender_rsfec = is_enabled;
     }
 
     pub fn set_sctp_max_message_size_can_send(

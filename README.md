@@ -21,11 +21,11 @@ OpenUUYC 是用 Rust 编写的 UU 远程第三方 Windows 客户端。使用已�
 - **批注**：画笔、形状、擦除、撤销重做，以及激光笔和鼠标指示；笔迹在远端可见。
 - **插件**：用节点图组合画面处理效果，提供[滤镜示例与插件 SDK](plugins/README.md)。
 
-目前支持 Windows x64，暂不支持本机被控。具体功能以所用版本的 Release 说明为准。
+目前支持 Windows x64。当前开发版新增本机桌面画面共享，需在本机明确开启；已发布版本的具体功能以所用 Release 说明为准。
 
 ## 构建
 
-需要 Rust stable（MSVC）、Visual Studio C++ 构建工具、Windows SDK、CMake 和 UPX，确保 `upx` 在 PATH 中。
+需要 Rust stable（MSVC）、Visual Studio C++ 构建工具、Windows SDK、CMake 和 UPX，确保 `upx` 在 PATH 中。软件 H.264 编解码使用项目 Rust 核心。
 
 ```powershell
 git clone https://github.com/djkcyl/openuuyc.git

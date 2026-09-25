@@ -1825,6 +1825,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "goog_cc"
+version = "0.1.4"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3232,6 +3239,7 @@ dependencies = [
  "embed-resource",
  "flate2",
  "futures-util",
+ "goog_cc",
  "hmac",
  "hyper",
  "image",
@@ -3240,8 +3248,11 @@ dependencies = [
  "libloading",
  "mediaway-common",
  "object",
+ "openuuyc-amf-sys",
  "openuuyc-h264",
+ "openuuyc-nvenc-sys",
  "openuuyc-plugin-api",
+ "openuuyc-vpl-sys",
  "opusic-c",
  "oxideav-h264",
  "oxideav-h265",
@@ -3274,6 +3285,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "openuuyc-amf-sys"
+version = "1.5.2"
+
+[[package]]
 name = "openuuyc-h264"
 version = "0.1.0"
 dependencies = [
@@ -3281,11 +3296,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "openuuyc-nvenc-sys"
+version = "0.1.0"
+
+[[package]]
 name = "openuuyc-plugin-api"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "openuuyc-vpl-sys"
+version = "2.0.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

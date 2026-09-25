@@ -1,0 +1,10 @@
+[package]
+name = "openuuyc-nvenc-sys"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Windows NVENC ABI subset of nvidia-video-codec-sdk 0.4.0"
+
+[lib]
+path = "src/lib.rs"

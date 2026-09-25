@@ -58,6 +58,7 @@ const RECONNECT_KEY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_KEY_MAX_AGE: Duration = Duration::from_secs(300);
 const RECONNECT_KEY_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SDP_BYTES: u64 = 1024 * 1024;
+pub(crate) mod host;
 mod tls;
 mod transport;
 use transport::SignalTransport;
@@ -839,10 +840,29 @@ impl SignalSession {
     }
 
     pub async fn keep_alive(
+        self,
+        shutdown: oneshot::Receiver<()>,
+        peer: Option<std::sync::Arc<NativePeer>>,
+        control: Option<ControlSessionInfo>,
+    ) -> Result<()> {
+        self.keep_alive_inner(shutdown, peer, control, None).await
+    }
+
+    pub(crate) async fn keep_alive_host(
+        self,
+        shutdown: oneshot::Receiver<()>,
+        client: std::sync::Arc<crate::client::AuthenticatedClient>,
+    ) -> Result<()> {
+        self.keep_alive_inner(shutdown, None, None, Some(host::Session::new(client)))
+            .await
+    }
+
+    async fn keep_alive_inner(
         mut self,
         mut shutdown: oneshot::Receiver<()>,
         peer: Option<std::sync::Arc<NativePeer>>,
         control: Option<ControlSessionInfo>,
+        mut host: Option<host::Session>,
     ) -> Result<()> {
         let mut next_key_check = tokio::time::Instant::now() + RECONNECT_KEY_CHECK_INTERVAL;
         let mut pending_key_refresh: Option<(u64, tokio::time::Instant)> = None;
@@ -867,6 +887,9 @@ impl SignalSession {
             if peer.is_some() != control.is_some() { bail!("controller signaling lifecycle is incomplete"); }
             loop {
             tokio::select! {
+                event=async {host.as_mut().expect("host session").next().await},if host.is_some()=>{
+                    host.as_mut().expect("host session").apply(event,&mut self).await?;
+                }
                 changed = async {
                     if let Some(requests) = &mut manual_network_requests { requests.changed().await }
                     else { pending().await }
@@ -964,6 +987,14 @@ impl SignalSession {
                 packet = self.next_packet() => {
                     match packet {
                         Err(error) => break Err(error),
+                        Ok(EnginePacket::Message(SocketPacket::Connect { .. })) if host.is_some()=>{
+                            host.as_mut().expect("host session").signaling_restored(&mut self).await?;
+                        }
+                        Ok(EnginePacket::Message(SocketPacket::Event {event,args,binary,..})) if host.is_some()=>{
+                            if let Err(error)=host.as_mut().expect("host session").event(&event,&args,&binary,&mut self).await {
+                                tracing::warn!(%error,"host signaling event rejected");
+                            }
+                        }
                         Ok(EnginePacket::Message(SocketPacket::Ack { id, args, .. }))
                             if pending_key_refresh.is_some_and(|(pending_id, _)| id == pending_id) =>
                         {
@@ -1153,6 +1184,9 @@ impl SignalSession {
         };
         if let Some(network) = &network_control {
             network.close();
+        }
+        if let Some(host) = host {
+            host.close().await;
         }
         if let Some(peer) = &peer {
             // A signaling-only failure can leave DTLS writable. Retire input

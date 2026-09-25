@@ -26,6 +26,7 @@ pub(crate) mod annotation;
 mod display_settings;
 mod display_topology;
 mod microphone;
+pub(crate) mod publisher;
 pub use display_settings::{
     DisplayChangeRequest, DisplayChangeStatus, DisplayResolution, RemoteDisplayInfo,
     RemoteDisplayMode,

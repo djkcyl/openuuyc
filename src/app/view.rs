@@ -6,6 +6,7 @@ mod assist;
 mod device_details;
 mod device_visuals;
 mod devices;
+mod host;
 mod logs;
 mod port_mapping;
 mod power;
@@ -28,6 +29,7 @@ enum Page {
     Management,
     DeviceDetails,
     Settings,
+    Host,
     Shortcuts,
     Logs,
     Plugins,
@@ -42,6 +44,7 @@ impl Page {
             Self::Management => "全部设备",
             Self::DeviceDetails => "设备详情",
             Self::Settings => "连接设置",
+            Self::Host => "本机画面共享",
             Self::Shortcuts => "快捷键设置",
             Self::Logs => "日志设置",
             Self::Plugins => "插件管理",
@@ -52,6 +55,7 @@ impl Page {
 
 #[derive(Default)]
 pub(super) struct CenterUi {
+    host: host::Ui,
     page: Page,
     device_lists: [devices::ListUi; 2],
     detail_id: Option<String>,
@@ -612,6 +616,8 @@ impl DeviceCenterApp {
                     self.device_details_page(ui);
                 } else if self.center_ui.page == Page::Settings {
                     self.settings_page(ui);
+                } else if self.center_ui.page == Page::Host {
+                    self.host_page(ui);
                 } else if self.center_ui.page == Page::Shortcuts {
                     self.shortcuts_page(ui);
                 } else if self.center_ui.page == Page::Logs {
@@ -732,6 +738,16 @@ impl DeviceCenterApp {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(8.0);
+                if nav_item(
+                    ui,
+                    Icon::Monitor,
+                    "本机画面共享",
+                    None,
+                    self.center_ui.page == Page::Host,
+                ) {
+                    self.center_ui.page = Page::Host;
+                    self.center_ui.host.refresh();
+                }
                 if nav_item(
                     ui,
                     Icon::Settings,

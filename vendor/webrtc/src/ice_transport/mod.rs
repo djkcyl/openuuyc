@@ -287,6 +287,12 @@ impl RTCIceTransport {
         internal.role
     }
 
+    /// The role assigned by offer/answer before ICE conflict resolution.
+    /// DTLS setup negotiation must not follow later ICE role changes.
+    pub(crate) async fn negotiation_role(&self) -> RTCIceRole {
+        self.internal.lock().await.role
+    }
+
     /// set_remote_candidates sets the sequence of candidates associated with the remote ICETransport.
     pub async fn set_remote_candidates(&self, remote_candidates: &[RTCIceCandidate]) -> Result<()> {
         self.ensure_gatherer().await?;

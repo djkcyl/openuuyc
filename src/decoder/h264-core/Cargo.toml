@@ -7,8 +7,8 @@ license = "LGPL-2.1-or-later"
 description = "OpenUUYC platform-independent H.264 software core"
 
 [dependencies]
-# Parameter-set and slice-header syntax only. Pixel/entropy processing below
-# this boundary uses this crate's own FFmpeg-derived streaming implementation.
+# Parameter-set parsing and selected forward/inverse transform primitives.
+# Decoder pixels and the realtime encoder pipeline are owned by this crate.
 oxideav-h264 = "=0.1.8"
 
 [lib]

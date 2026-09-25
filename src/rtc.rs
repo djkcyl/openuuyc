@@ -4077,13 +4077,21 @@ async fn send_transport_layer_nack(
 }
 
 fn apply_uu_application_attributes(sdp: &mut String) -> Result<()> {
+    apply_uu_application_attributes_for_role(sdp, "audio_0")
+}
+
+pub(crate) fn apply_uu_application_attributes_for_role(
+    sdp: &mut String,
+    streams: &str,
+) -> Result<()> {
     const EXTMAP_ALLOW_MIXED: &str = "a=extmap-allow-mixed";
-    const AUDIO_MSID_SEMANTIC: &str = "a=msid-semantic: WMS audio_0";
+    let msid_semantic = format!("a=msid-semantic: WMS {streams}");
     const MAX_MESSAGE_SIZE: &str = "a=max-message-size:524288";
     const MIXED_KCP: &str = "a=x-uuremote-mix-kcp:2";
 
     let uses_crlf = sdp.contains("\r\n");
     let mut lines = sdp.lines().map(str::to_owned).collect::<Vec<_>>();
+    lines.retain(|line| !line.starts_with("a=msid-semantic:"));
     let first_media = lines
         .iter()
         .position(|line| line.starts_with("m="))
@@ -4092,7 +4100,7 @@ fn apply_uu_application_attributes(sdp: &mut String) -> Result<()> {
         .iter()
         .position(|line| line.starts_with("a=group:BUNDLE"))
         .map_or(first_media, |index| index + 1);
-    for value in [EXTMAP_ALLOW_MIXED, AUDIO_MSID_SEMANTIC].into_iter().rev() {
+    for value in [EXTMAP_ALLOW_MIXED, &msid_semantic].into_iter().rev() {
         if !lines[..first_media].iter().any(|line| line == value) {
             lines.insert(session_insert, value.to_owned());
         }
@@ -4134,7 +4142,7 @@ fn apply_uu_application_attributes(sdp: &mut String) -> Result<()> {
     Ok(())
 }
 
-fn negotiated_mixed_kcp_version(sdp: &str) -> Result<Option<u8>> {
+pub(crate) fn negotiated_mixed_kcp_version(sdp: &str) -> Result<Option<u8>> {
     let Some(value) = sdp
         .lines()
         .find_map(|line| line.strip_prefix("a=x-uuremote-mix-kcp:"))

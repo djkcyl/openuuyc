@@ -76,6 +76,7 @@ impl std::error::Error for SignalFailure {}
 
 enum Command {
     Send(Vec<Message>),
+    SendConnected(Vec<Message>, tokio::sync::oneshot::Sender<Result<()>>),
     Controlling(bool),
     ReconnectKey(Option<String>),
     Close,
@@ -132,6 +133,17 @@ impl SignalTransport {
         self.commands
             .send(Command::Send(messages))
             .map_err(|_| anyhow!("signaling transport stopped"))
+    }
+
+    pub(super) async fn send_connected(&self, messages: Vec<Message>) -> Result<()> {
+        anyhow::ensure!(self.is_connected(), "signaling namespace is not connected");
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(Command::SendConnected(messages, done))
+            .map_err(|_| anyhow!("signaling transport stopped"))?;
+        result
+            .await
+            .context("signaling transport stopped before submission")?
     }
 
     pub(super) fn set_controlling(&self, value: bool) {
@@ -219,6 +231,20 @@ impl Worker {
 
     fn command(&mut self, command: Option<Command>, socket_open: bool) {
         match command {
+            Some(Command::SendConnected(messages, done)) => {
+                // A room-wide stop must be admitted by the current namespace,
+                // never saved during reconnect for a later control session.
+                // Acknowledge admission before the host processes a new peer.
+                let result = if socket_open && *self.state.borrow() == SocketState::Connected {
+                    self.command(Some(Command::Send(messages)), true);
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "signaling namespace disconnected before submission"
+                    ))
+                };
+                let _ = done.send(result);
+            }
             Some(Command::Send(messages)) => {
                 if let Some(Message::Text(text)) = messages.first()
                     && let Ok(EnginePacket::Message(
