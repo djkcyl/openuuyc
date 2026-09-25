@@ -53,7 +53,7 @@ pub(crate) struct Shared {
     pub generation: AtomicU64,
     pub sample_fps: AtomicU64,
     pub signals: Mutex<std::collections::BTreeMap<u64, Arc<super::hotkeys::ControlGate>>>,
-    pub physical: Mutex<Option<crate::remote_input::RemoteInput>>,
+    pub physical: Mutex<Option<crate::features::remote_input::RemoteInput>>,
     pub view: Mutex<Option<sdk::Viewport>>,
     pub sample: Mutex<Option<Sample>>,
     pub display: Mutex<Display>,
@@ -192,7 +192,7 @@ fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x08000000);
-    crate::logging::configure_child(&mut command);
+    crate::diagnostics::logging::configure_child(&mut command);
     let mut child = command.spawn().context("启动插件宿主")?;
     let job = match Job::attach(&child) {
         Ok(j) => j,

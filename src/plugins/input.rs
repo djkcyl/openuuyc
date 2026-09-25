@@ -4,7 +4,7 @@ use super::{
     process::{Shared, lock},
     sdk,
 };
-use crate::remote_input::{CorrectionBasis, RemoteInput};
+use crate::features::remote_input::{CorrectionBasis, RemoteInput};
 use std::{
     sync::{
         Arc,

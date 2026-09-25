@@ -312,8 +312,8 @@ fn annotation_laser_options(ui: &mut Ui, tail_ms: &mut u16) {
     ui.add(
         egui::Slider::new(
             tail_ms,
-            crate::stream_control::annotation::LASER_TAIL_MIN
-                ..=crate::stream_control::annotation::LASER_TAIL_MAX,
+            crate::features::stream_control::annotation::LASER_TAIL_MIN
+                ..=crate::features::stream_control::annotation::LASER_TAIL_MAX,
         )
         .suffix(" ms"),
     );

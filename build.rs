@@ -15,7 +15,7 @@ fn main() {
 fn build_neteq() {
     let root = std::path::Path::new("vendor/webrtc_neteq");
     println!("cargo:rerun-if-changed=vendor/webrtc_neteq");
-    println!("cargo:rerun-if-changed=src/audio/neteq_bridge.cc");
+    println!("cargo:rerun-if-changed=src/media/audio/neteq_bridge.cc");
     let sources = std::fs::read_to_string(root.join("sources.txt")).expect("NetEq source manifest");
     let mut cpp = cc::Build::new();
     let mut c = cc::Build::new();
@@ -38,7 +38,7 @@ fn build_neteq() {
         .std("c++17")
         .flag_if_supported("/EHsc")
         .flag_if_supported("/Zc:__cplusplus");
-    cpp.file("src/audio/neteq_bridge.cc");
+    cpp.file("src/media/audio/neteq_bridge.cc");
     for source in sources
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))

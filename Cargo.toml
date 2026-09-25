@@ -1,6 +1,6 @@
 [package]
 name = "openuuyc"
-version = "0.7.0"
+version = "1.0.0-alpha.1"
 edition = "2024"
 description = "Third-party Rust client for UU Remote protocol interoperability"
 license-file = "LICENSE"
@@ -71,7 +71,7 @@ windows-core = "0.62.2"
 openuuyc-plugin-api = { path = "plugins/sdk" }
 libloading = "0.8.9"
 openuuyc-nvenc-sys = { path = "vendor/nvenc-sys" }
-openuuyc-h264 = { path = "src/decoder/h264-core" }
+openuuyc-h264 = { path = "crates/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
 oxideav-h265 = { version = "=0.0.10" }
 egui-directx11 = { path = "vendor/egui-directx11" }
@@ -79,6 +79,8 @@ egui-winit = { version = "0.36.1", default-features = false, features = ["clipbo
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Devices_Display",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_IO",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
@@ -95,6 +97,7 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Threading",
+    "Win32_System_Registry",
     "Win32_System_JobObjects",
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",

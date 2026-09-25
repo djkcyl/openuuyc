@@ -241,281 +241,270 @@ impl Manager {
         let mut configure = None;
         let mut folder = None;
         let mut details = self.details.clone();
-        egui::ScrollArea::vertical()
-            .id_salt("installed-plugins")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let wide = ui.available_width() >= 780.0;
-                let columns = columns(ui.available_width(), wide);
-                let (header, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 26.0),
-                    egui::Sense::hover(),
+        crate::ui::controls::page_scroll("installed-plugins").show(ui, |ui| {
+            let wide = ui.available_width() >= 780.0;
+            let columns = columns(ui.available_width(), wide);
+            let (header, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+            for (offset, label) in [
+                (12.0, "插件"),
+                (columns[1], "类型"),
+                (columns[2], "版本"),
+                (columns[3], "状态"),
+                (columns[4], "操作"),
+            ] {
+                if !wide && matches!(label, "类型" | "版本") {
+                    continue;
+                }
+                ui.painter().text(
+                    header.left_top() + egui::vec2(offset, 8.0),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    egui::FontId::proportional(crate::ui::theme::SMALL),
+                    crate::ui::theme::MUTED,
                 );
-                for (offset, label) in [
-                    (12.0, "插件"),
-                    (columns[1], "类型"),
-                    (columns[2], "版本"),
-                    (columns[3], "状态"),
-                    (columns[4], "操作"),
-                ] {
-                    if !wide && matches!(label, "类型" | "版本") {
-                        continue;
-                    }
-                    ui.painter().text(
-                        header.left_top() + egui::vec2(offset, 8.0),
-                        egui::Align2::LEFT_CENTER,
-                        label,
-                        egui::FontId::proportional(crate::ui::theme::SMALL),
-                        crate::ui::theme::MUTED,
-                    );
-                }
-                if visible.is_empty() {
-                    ui.add_space(28.0);
-                    ui.vertical_centered(|ui| {
-                        ui.weak(if self.entries.is_empty() {
-                            "尚未安装插件"
-                        } else {
-                            "没有匹配的插件"
-                        });
+            }
+            if visible.is_empty() {
+                ui.add_space(28.0);
+                ui.vertical_centered(|ui| {
+                    ui.weak(if self.entries.is_empty() {
+                        "尚未安装插件"
+                    } else {
+                        "没有匹配的插件"
                     });
-                }
-                for entry in &visible {
-                    ui.push_id(&entry.path, |ui| {
-                        let expanded = details.as_ref() == Some(&entry.path);
-                        let (row, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 64.0),
-                            egui::Sense::hover(),
-                        );
-                        if expanded || response.hovered() {
-                            ui.painter().rect_filled(row, 5.0, crate::ui::theme::HOVER);
-                        }
-                        let icon = egui::Rect::from_center_size(
-                            egui::pos2(row.left() + 28.0, row.center().y),
-                            egui::vec2(32.0, 32.0),
-                        );
-                        ui.painter()
-                            .rect_filled(icon, 6.0, crate::ui::theme::SELECTED);
-                        super::paint_plugin_icon(ui.painter(), icon, crate::ui::theme::ACCENT);
-                        let title = entry.manifest.as_ref().map_or_else(
-                            || {
-                                entry
-                                    .path
-                                    .parent()
-                                    .and_then(Path::file_name)
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| "无效插件".into())
-                            },
-                            |m| m.name.clone(),
-                        );
-                        let subtitle = entry.manifest.as_ref().map_or_else(
-                            || "无法读取插件清单".into(),
-                            |m| {
-                                if wide {
-                                    m.id.clone()
-                                } else {
-                                    format!("{} · {} · v{}", m.id, kind(&m.capability), m.version)
-                                }
-                            },
-                        );
-                        cell(
-                            ui,
-                            row.shrink2(egui::vec2(0.0, 13.0)),
-                            52.0,
-                            columns[1] - 60.0,
-                            |ui| {
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 3.0;
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&title)
-                                                .size(crate::ui::theme::BODY),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&title);
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&subtitle)
-                                                .size(crate::ui::theme::TINY)
-                                                .color(crate::ui::theme::MUTED),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&subtitle);
-                                });
-                            },
-                        );
-                        if wide {
-                            cell(ui, row, columns[1], columns[2] - columns[1] - 8.0, |ui| {
-                                ui.weak(
-                                    entry
-                                        .manifest
-                                        .as_ref()
-                                        .map_or("未知", |m| kind(&m.capability)),
-                                );
-                            });
-                            cell(ui, row, columns[2], columns[3] - columns[2] - 8.0, |ui| {
-                                let version =
-                                    entry.manifest.as_ref().map_or("—", |m| m.version.as_str());
+                });
+            }
+            for entry in &visible {
+                ui.push_id(&entry.path, |ui| {
+                    let expanded = details.as_ref() == Some(&entry.path);
+                    let (row, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 64.0),
+                        egui::Sense::hover(),
+                    );
+                    if expanded || response.hovered() {
+                        ui.painter().rect_filled(row, 5.0, crate::ui::theme::HOVER);
+                    }
+                    let icon = egui::Rect::from_center_size(
+                        egui::pos2(row.left() + 28.0, row.center().y),
+                        egui::vec2(32.0, 32.0),
+                    );
+                    ui.painter()
+                        .rect_filled(icon, 6.0, crate::ui::theme::SELECTED);
+                    super::paint_plugin_icon(ui.painter(), icon, crate::ui::theme::ACCENT);
+                    let title = entry.manifest.as_ref().map_or_else(
+                        || {
+                            entry
+                                .path
+                                .parent()
+                                .and_then(Path::file_name)
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "无效插件".into())
+                        },
+                        |m| m.name.clone(),
+                    );
+                    let subtitle = entry.manifest.as_ref().map_or_else(
+                        || "无法读取插件清单".into(),
+                        |m| {
+                            if wide {
+                                m.id.clone()
+                            } else {
+                                format!("{} · {} · v{}", m.id, kind(&m.capability), m.version)
+                            }
+                        },
+                    );
+                    cell(
+                        ui,
+                        row.shrink2(egui::vec2(0.0, 13.0)),
+                        52.0,
+                        columns[1] - 60.0,
+                        |ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 3.0;
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(version).color(crate::ui::theme::MUTED),
+                                        egui::RichText::new(&title).size(crate::ui::theme::BODY),
                                     )
                                     .truncate(),
                                 )
-                                .on_hover_text(version);
+                                .on_hover_text(&title);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&subtitle)
+                                            .size(crate::ui::theme::TINY)
+                                            .color(crate::ui::theme::MUTED),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&subtitle);
                             });
-                        }
-                        cell(ui, row, columns[3], columns[4] - columns[3] - 4.0, |ui| {
-                            let color = if entry.error.is_some() || !entry.node_errors.is_empty() {
-                                crate::ui::theme::AMBER
-                            } else {
-                                crate::ui::theme::GREEN
-                            };
-                            let (dot, _) =
-                                ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                            ui.painter().circle_filled(dot.center(), 2.5, color);
-                            ui.colored_label(
-                                color,
-                                if entry.error.is_some() {
-                                    "异常"
-                                } else if !entry.node_errors.is_empty() {
-                                    "部分可用"
-                                } else {
-                                    "正常"
-                                },
-                            )
-                            .on_hover_text(
+                        },
+                    );
+                    if wide {
+                        cell(ui, row, columns[1], columns[2] - columns[1] - 8.0, |ui| {
+                            ui.weak(
                                 entry
-                                    .error
-                                    .as_deref()
-                                    .or_else(|| {
-                                        entry.node_errors.values().next().map(String::as_str)
-                                    })
-                                    .unwrap_or("安装检查通过"),
+                                    .manifest
+                                    .as_ref()
+                                    .map_or("未知", |m| kind(&m.capability)),
                             );
                         });
-                        cell(ui, row, columns[4], row.width() - columns[4] - 8.0, |ui| {
-                            if ui
+                        cell(ui, row, columns[2], columns[3] - columns[2] - 8.0, |ui| {
+                            let version =
+                                entry.manifest.as_ref().map_or("—", |m| m.version.as_str());
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(version).color(crate::ui::theme::MUTED),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(version);
+                        });
+                    }
+                    cell(ui, row, columns[3], columns[4] - columns[3] - 4.0, |ui| {
+                        let color = if entry.error.is_some() || !entry.node_errors.is_empty() {
+                            crate::ui::theme::AMBER
+                        } else {
+                            crate::ui::theme::GREEN
+                        };
+                        let (dot, _) =
+                            ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 2.5, color);
+                        ui.colored_label(
+                            color,
+                            if entry.error.is_some() {
+                                "异常"
+                            } else if !entry.node_errors.is_empty() {
+                                "部分可用"
+                            } else {
+                                "正常"
+                            },
+                        )
+                        .on_hover_text(
+                            entry
+                                .error
+                                .as_deref()
+                                .or_else(|| entry.node_errors.values().next().map(String::as_str))
+                                .unwrap_or("安装检查通过"),
+                        );
+                    });
+                    cell(ui, row, columns[4], row.width() - columns[4] - 8.0, |ui| {
+                        if ui
+                            .add_sized(
+                                [48.0, crate::ui::controls::HEIGHT],
+                                egui::Button::new(if expanded { "收起" } else { "详情" }),
+                            )
+                            .clicked()
+                        {
+                            details = if expanded {
+                                None
+                            } else {
+                                Some(entry.path.clone())
+                            };
+                        }
+                        if ui
+                            .add_sized(
+                                [58.0, crate::ui::controls::HEIGHT],
+                                egui::Button::new("文件夹"),
+                            )
+                            .clicked()
+                        {
+                            folder = entry.path.parent().map(Path::to_owned);
+                        }
+                        if entry.manifest.as_ref().is_some_and(configurable)
+                            && ui
                                 .add_sized(
                                     [48.0, crate::ui::controls::HEIGHT],
-                                    egui::Button::new(if expanded { "收起" } else { "详情" }),
+                                    egui::Button::new("配置"),
                                 )
                                 .clicked()
-                            {
-                                details = if expanded {
-                                    None
-                                } else {
-                                    Some(entry.path.clone())
-                                };
-                            }
-                            if ui
-                                .add_sized(
-                                    [58.0, crate::ui::controls::HEIGHT],
-                                    egui::Button::new("文件夹"),
-                                )
-                                .clicked()
-                            {
-                                folder = entry.path.parent().map(Path::to_owned);
-                            }
-                            if entry.manifest.as_ref().is_some_and(configurable)
-                                && ui
-                                    .add_sized(
-                                        [48.0, crate::ui::controls::HEIGHT],
-                                        egui::Button::new("配置"),
-                                    )
-                                    .clicked()
-                            {
-                                configure = Some(entry.path.clone());
-                            }
-                        });
-                        if details.as_ref() == Some(&entry.path) {
-                            egui::Frame::new()
-                                .inner_margin(egui::Margin {
-                                    left: 52,
-                                    right: 16,
-                                    top: 8,
-                                    bottom: 14,
-                                })
-                                .fill(crate::ui::theme::BG)
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    crate::ui::controls::observe_notice(
-                                        ui.ctx(),
-                                        ("plugin-entry-error", &entry.path),
-                                        "插件检查失败",
-                                        crate::ui::controls::DialogIcon::Error,
-                                        entry.error.as_deref(),
-                                    );
-                                    if let Some(m) = &entry.manifest {
-                                        if !m.dependencies.is_empty() {
-                                            ui.label(format!(
-                                                "依赖   {}",
-                                                m.dependencies
-                                                    .iter()
-                                                    .map(|id| names
-                                                        .get(id.as_str())
-                                                        .copied()
-                                                        .unwrap_or(id))
-                                                    .collect::<Vec<_>>()
-                                                    .join("、")
-                                            ));
-                                        }
-                                        for node in &m.nodes {
-                                            crate::ui::controls::observe_notice(
-                                                ui.ctx(),
-                                                ("plugin-node-error", &entry.path, &node.type_id),
-                                                "插件节点检查失败",
-                                                crate::ui::controls::DialogIcon::Error,
-                                                entry
-                                                    .node_errors
-                                                    .get(&node.type_id)
-                                                    .map(String::as_str),
-                                            );
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.label(&node.name);
-                                                ui.weak(&node.description);
-                                            });
-                                        }
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(
-                                                    m.path
-                                                        .file_name()
-                                                        .unwrap_or_default()
-                                                        .to_string_lossy(),
-                                                )
-                                                .size(crate::ui::theme::SMALL)
-                                                .weak(),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(
-                                            m.path
-                                                .file_name()
-                                                .unwrap_or_default()
-                                                .to_string_lossy(),
+                        {
+                            configure = Some(entry.path.clone());
+                        }
+                    });
+                    if details.as_ref() == Some(&entry.path) {
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin {
+                                left: 52,
+                                right: 16,
+                                top: 8,
+                                bottom: 14,
+                            })
+                            .fill(crate::ui::theme::BG)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                crate::ui::controls::observe_notice(
+                                    ui.ctx(),
+                                    ("plugin-entry-error", &entry.path),
+                                    "插件检查失败",
+                                    crate::ui::controls::DialogIcon::Error,
+                                    entry.error.as_deref(),
+                                );
+                                if let Some(m) = &entry.manifest {
+                                    if !m.dependencies.is_empty() {
+                                        ui.label(format!(
+                                            "依赖   {}",
+                                            m.dependencies
+                                                .iter()
+                                                .map(|id| names
+                                                    .get(id.as_str())
+                                                    .copied()
+                                                    .unwrap_or(id))
+                                                .collect::<Vec<_>>()
+                                                .join("、")
+                                        ));
+                                    }
+                                    for node in &m.nodes {
+                                        crate::ui::controls::observe_notice(
+                                            ui.ctx(),
+                                            ("plugin-node-error", &entry.path, &node.type_id),
+                                            "插件节点检查失败",
+                                            crate::ui::controls::DialogIcon::Error,
+                                            entry
+                                                .node_errors
+                                                .get(&node.type_id)
+                                                .map(String::as_str),
                                         );
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(&node.name);
+                                            ui.weak(&node.description);
+                                        });
                                     }
                                     ui.add(
                                         egui::Label::new(
-                                            egui::RichText::new(entry.path.display().to_string())
-                                                .size(crate::ui::theme::TINY)
-                                                .weak(),
+                                            egui::RichText::new(
+                                                m.path
+                                                    .file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy(),
+                                            )
+                                            .size(crate::ui::theme::SMALL)
+                                            .weak(),
                                         )
                                         .truncate(),
                                     )
-                                    .on_hover_text(entry.path.display().to_string());
-                                });
-                        }
-                        ui.painter().hline(
-                            row.left() + 12.0..=row.right() - 12.0,
-                            ui.cursor().top(),
-                            egui::Stroke::new(1.0, crate::ui::theme::LINE),
-                        );
-                    });
-                }
-            });
+                                    .on_hover_text(
+                                        m.path.file_name().unwrap_or_default().to_string_lossy(),
+                                    );
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(entry.path.display().to_string())
+                                            .size(crate::ui::theme::TINY)
+                                            .weak(),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(entry.path.display().to_string());
+                            });
+                    }
+                    ui.painter().hline(
+                        row.left() + 12.0..=row.right() - 12.0,
+                        ui.cursor().top(),
+                        egui::Stroke::new(1.0, crate::ui::theme::LINE),
+                    );
+                });
+            }
+        });
         self.details = details;
         if let Some(path) = folder
             && let Err(e) = open_folder(&path)
@@ -585,25 +574,23 @@ impl Manager {
                 .unwrap_or_default(),
         );
         ui.add_space(18.0);
-        egui::ScrollArea::vertical()
-            .id_salt("module-config")
-            .show(ui, |ui| {
-                let width = (ui.available_width() - 32.0).min(680.0);
-                egui::Frame::new()
-                    .fill(crate::ui::theme::SURFACE)
-                    .corner_radius(crate::ui::theme::PANEL_RADIUS)
-                    .inner_margin(16)
-                    .show(ui, |ui| {
-                        ui.set_width(width);
-                        ui.spacing_mut().item_spacing.y = 8.0;
-                        if let Some(config) = edit.document.get_mut("config") {
-                            *config = edit.fields.with_defaults(config);
-                            for key in edit.fields.keys(config) {
-                                edit.fields.row(ui, &key, config);
-                            }
+        crate::ui::controls::page_scroll("module-config").show(ui, |ui| {
+            let width = (ui.available_width() - 32.0).max(0.0);
+            egui::Frame::new()
+                .fill(crate::ui::theme::SURFACE)
+                .corner_radius(crate::ui::theme::PANEL_RADIUS)
+                .inner_margin(16)
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    if let Some(config) = edit.document.get_mut("config") {
+                        *config = edit.fields.with_defaults(config);
+                        for key in edit.fields.keys(config) {
+                            edit.fields.row(ui, &key, config);
                         }
-                    });
-            });
+                    }
+                });
+        });
         if save {
             let result =
                 super::settings::write(&edit.path, &edit.original, &edit.document["config"]);

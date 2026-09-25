@@ -94,6 +94,13 @@ pub struct RTCDataChannel {
 }
 
 impl RTCDataChannel {
+    // An accepted in-band DCEP channel is not locally allocated and is not an
+    // out-of-band negotiated channel. Publish its actual stream ID before the
+    // application's on_data_channel/on_open callbacks can route messages.
+    pub(crate) fn set_remote_id(&self, id: u16) {
+        self.id.store(id, Ordering::SeqCst);
+    }
+
     // create the DataChannel object before the networking is set up.
     pub(crate) fn new(params: DataChannelParameters, setting_engine: Arc<SettingEngine>) -> Self {
         // the id value if non-negotiated doesn't matter, since it will be overwritten

@@ -1,7 +1,7 @@
 use super::d3d11::UiPresenter;
 use super::window_manager::{self, Event, Repaint, Request};
 use super::{AppFactory, AppSession, WindowConfig};
-use crate::viewer::windows_presenter::ConnectingWindowsRunner;
+use crate::application::viewer::windows_presenter::ConnectingWindowsRunner;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -22,9 +22,9 @@ use winit::window::{Window, WindowId};
 
 pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
     let mut builder = EventLoop::<Event>::with_user_event();
-    builder.with_msg_hook(crate::viewer::desktop_input_message);
+    builder.with_msg_hook(crate::application::viewer::desktop_input_message);
     let event_loop = builder.build().context("create desktop event loop")?;
-    let _input_hook = crate::viewer::desktop_input_hook()?;
+    let _input_hook = crate::application::viewer::desktop_input_hook()?;
     let mut runner = Windows {
         main: Runner {
             config,
@@ -43,7 +43,7 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
         .run_app(&mut runner)
         .context("run D3D11 desktop event loop")?;
     window_manager::install(None);
-    crate::clipboard::shutdown();
+    crate::features::clipboard::shutdown();
     if let Some(error) = runner.main.error.take() {
         bail!(error);
     }
@@ -125,7 +125,9 @@ impl Runner {
         super::chrome::configure_dwm_window(&window);
         super::branding::set_taskbar_icon(&window);
         if self.root {
-            crate::app::instance::register_window(super::d3d11::window_hwnd(&window)?)?;
+            crate::application::app::instance::register_window(super::d3d11::window_hwnd(
+                &window,
+            )?)?;
         }
         if self.config.centered
             && let Some(monitor) = window.current_monitor()

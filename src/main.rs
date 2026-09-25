@@ -8,9 +8,15 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use openuuyc::{
-    api, app, client::AuthenticatedClient, controller, logging, login, media, rtc, signal,
-};
+use openuuyc::account::api;
+use openuuyc::account::client::AuthenticatedClient;
+use openuuyc::account::login;
+use openuuyc::application::app;
+use openuuyc::diagnostics::logging;
+use openuuyc::media;
+use openuuyc::session::controller;
+use openuuyc::transport::rtc;
+use openuuyc::transport::signal;
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +37,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(hide = true)]
+    DisplayDriverInstall,
+    #[command(hide = true)]
+    DisplayDriverUninstall,
+    #[command(hide = true)]
+    DisplayRecovery { token: String },
     #[command(hide = true)]
     PluginVideoHost,
 
@@ -108,7 +120,13 @@ fn main() -> Result<()> {
     if !parsed.as_ref().is_ok_and(|cli| {
         matches!(
             &cli.command,
-            Some(Commands::PluginHost { .. } | Commands::PluginVideoHost)
+            Some(
+                Commands::PluginHost { .. }
+                    | Commands::PluginVideoHost
+                    | Commands::DisplayRecovery { .. }
+                    | Commands::DisplayDriverInstall
+                    | Commands::DisplayDriverUninstall
+            )
         )
     }) {
         attach_parent_console();
@@ -132,7 +150,28 @@ fn main() -> Result<()> {
     let _logging = logging::init(cli.log_level.as_deref(), cli.log_file.as_deref())?;
     tracing::info!(target: "openuuyc", version = env!("CARGO_PKG_VERSION"), "application started");
 
+    if matches!(
+        command,
+        Commands::DisplayDriverInstall | Commands::DisplayDriverUninstall
+    ) {
+        let reboot = if matches!(command, Commands::DisplayDriverInstall) {
+            openuuyc::application::install_display_driver()
+        } else {
+            openuuyc::application::uninstall_display_driver()
+        };
+        if let Err(error) = &reboot {
+            tracing::error!(%error, "display driver operation failed");
+        }
+        let reboot = reboot?;
+        drop(_logging);
+        if reboot {
+            std::process::exit(3010);
+        }
+        return Ok(());
+    }
     let result = match command {
+        Commands::DisplayDriverInstall | Commands::DisplayDriverUninstall => unreachable!(),
+        Commands::DisplayRecovery { token } => openuuyc::application::display_recovery(&token),
         Commands::PluginVideoHost => openuuyc::plugins::video::host(),
 
         Commands::PluginHost { manifest } => openuuyc::plugins::host(&manifest),
@@ -216,7 +255,10 @@ fn main() -> Result<()> {
             assist_stdin,
         )),
         Commands::RtpCaptureInfo { path } => {
-            print!("{}", openuuyc::rtp_capture::inspect_capture(path)?);
+            print!(
+                "{}",
+                openuuyc::diagnostics::rtp_capture::inspect_capture(path)?
+            );
             Ok(())
         }
         Commands::RtpReplay {
@@ -225,9 +267,9 @@ fn main() -> Result<()> {
         } => {
             print!(
                 "{}",
-                openuuyc::official_receiver::replay_capture(
+                openuuyc::transport::official_receiver::replay_capture(
                     path,
-                    openuuyc::official_receiver::ReplayOptions {
+                    openuuyc::transport::official_receiver::ReplayOptions {
                         drop_repairable_originals,
                     },
                 )?
@@ -257,7 +299,7 @@ async fn connect_device(
     assist_stdin: bool,
 ) -> Result<()> {
     if assist_stdin {
-        let request = openuuyc::assist::read_launch_request()?;
+        let request = openuuyc::account::assist::read_launch_request()?;
         return controller::run_assist_viewer_window(device, request, options).await;
     }
     controller::run_saved_viewer_window(device, options, device_id).await

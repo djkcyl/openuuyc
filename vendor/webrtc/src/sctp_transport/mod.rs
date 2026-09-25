@@ -369,6 +369,7 @@ impl RTCSctpTransport {
                 },
                 Arc::clone(&param.setting_engine),
             ));
+            rtc_dc.set_remote_id(dc.stream_identifier());
 
             if let Some(handler) = &*param.on_data_channel_handler.load() {
                 let mut f = handler.lock().await;

@@ -1,0 +1,544 @@
+//! Display RPC direction for the controlled role. Host owners perform native
+//! operations; protobuf construction stays beside the existing wire contract.
+use super::*;
+use crate::features::host::lock;
+use crate::features::host::peer::screens::{ScreenInfo, Screens};
+use crate::features::stream_control::display_topology::PbDisplayResult;
+use crate::features::stream_control::wire::PbCaptureSettingRequest;
+use std::collections::BTreeMap;
+
+pub(crate) fn screen_states(
+    screens: &[ScreenInfo],
+    tracks: &BTreeMap<i32, usize>,
+    current: i32,
+) -> Vec<u8> {
+    let entries =
+        screens
+            .iter()
+            .map(|info| {
+                let screen = &info.screen;
+                let rect = |width: u32, height: u32| PbWinRect {
+                    left: screen.left,
+                    top: screen.top,
+                    width: width as i32,
+                    height: height as i32,
+                    pixel_width: width as i32,
+                    pixel_height: height as i32,
+                };
+                let mut sizes: Vec<_> = info
+                    .target
+                    .as_ref()
+                    .map(|t| t.modes.iter().map(|m| (m.width, m.height)).collect())
+                    .unwrap_or_default();
+                sizes.push((screen.width, screen.height));
+                sizes.sort_unstable();
+                sizes.dedup();
+                PbScreen {
+                    id: screen.id,
+                    fps: screen.fps.min(i32::MAX as u32) as i32,
+                    resolutions: sizes.into_iter().map(|(w, h)| rect(w, h)).collect(),
+                    current_resolution: Some(rect(screen.width, screen.height)),
+                    init_resolution: Some(PbWinRect {
+                        left: info.initial.left,
+                        top: info.initial.top,
+                        ..rect(info.initial.width, info.initial.height)
+                    }),
+                    screen_type: info.kind,
+                    is_primary_screen: screen.primary,
+                    dpr: 1.0,
+                    dpi_scale: info.target.as_ref().and_then(|t| t.dpi.as_ref()).map(|d| {
+                        PbDpiScale {
+                            current_dpi: d.current as i32,
+                            recommended_dpi: d.recommended as i32,
+                            dpis: d.supported.iter().map(|v| *v as i32).collect(),
+                        }
+                    }),
+                    display_name: info
+                        .target
+                        .as_ref()
+                        .and_then(|target| crate::media::capture::monitor_name(&target.name))
+                        .or_else(|| crate::media::capture::monitor_name(&screen.display_name))
+                        .unwrap_or_default()
+                        .to_owned(),
+                    resolution_type: info.resolution_type,
+                    video_track_index: tracks.get(&screen.id).map_or(-1, |i| *i as i32),
+                    builtin_screen_type: 0,
+                }
+            })
+            .collect();
+    PbControlMessage {
+        payload: Some(PbPayload::Screens(PbScreenSources {
+            current_screen_id: current,
+            screens: entries,
+        })),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn response(
+    message: &PbControlMessage,
+    header: Option<PbResponseHeader>,
+    payload: PbRpcResponsePayload,
+) -> Received {
+    vec![
+        PbControlMessage {
+            seq: message.seq,
+            timestamp: message.timestamp,
+            payload: Some(PbPayload::RpcResponse(PbRpcResponse {
+                response_header: header,
+                payload: Some(payload),
+            })),
+        }
+        .encode_to_vec(),
+    ]
+    .into()
+}
+
+pub(crate) async fn receive_session(
+    session: &mut Screens,
+    bytes: &[u8],
+    control: bool,
+) -> Result<Received> {
+    anyhow::ensure!(session.authorization().requested(), "被控许可已失效");
+    if bytes.first() == Some(&b'{') {
+        return Ok(Received::default());
+    }
+    let message = PbControlMessage::decode(bytes)?;
+    if !control {
+        if let Some(PbPayload::SimpleAction(action)) = &message.payload {
+            if matches!(action.action, 7 | 8) {
+                let args: serde_json::Value = if action.args.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_str(&action.args)?
+                };
+                anyhow::ensure!(
+                    action.action == 7 || args.get("scene").is_none_or(|v| v.as_str() == Some("")),
+                    "不支持的采集重启场景"
+                );
+                let id = args
+                    .get("screen_id")
+                    .map(|v| {
+                        v.as_i64()
+                            .and_then(|id| i32::try_from(id).ok())
+                            .context("无效屏幕标识")
+                    })
+                    .transpose()?
+                    .unwrap_or(-1);
+                tracing::debug!(
+                    action = action.action,
+                    screen_id = id,
+                    "host capture action"
+                );
+                if action.action == 7 {
+                    session.stop(id).await?;
+                } else if id == -1 {
+                    session.refresh()?;
+                    let ids: Vec<_> = session
+                        .slots
+                        .iter()
+                        .filter_map(|s| s.screen.as_ref().or(s.suspended.as_ref()).map(|s| s.id))
+                        .collect();
+                    for id in ids {
+                        session.start(id).await?;
+                    }
+                } else {
+                    session.start(id).await?;
+                }
+                return Ok(Received {
+                    refresh_state: true,
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some(PbPayload::RpcRequest(bytes)) = &message.payload {
+            let request = PbRpcRequest::decode(bytes.as_slice())?;
+            let header = request.request_header.clone().map(|h| PbResponseHeader {
+                request_id: h.request_id,
+            });
+            match request.payload {
+                Some(PbRpcRequestPayload::CreateVirtualDisplay(create)) => {
+                    let result = async {
+                        anyhow::ensure!(
+                            create.virtual_display_count == 1,
+                            "每次只能添加一块虚拟屏"
+                        );
+                        let resolutions = create
+                            .local_resolution
+                            .into_iter()
+                            .map(|r| Ok((u32::try_from(r.width)?, u32::try_from(r.height)?)))
+                            .collect::<Result<Vec<_>>>()?;
+                        session.create_virtual(resolutions).await
+                    }
+                    .await;
+                    let code = if result.is_ok() {
+                        0
+                    } else if session.available_slot().is_none() && session.registered.len() != 1 {
+                        -2
+                    } else {
+                        -1
+                    };
+                    report_display_result(&result);
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::CreateVirtualDisplayRsp(
+                            PbDisplayResult { error_code: code }.encode_to_vec(),
+                        ),
+                    ));
+                }
+                Some(PbRpcRequestPayload::RemoveVirtualDisplay(remove)) => {
+                    let result = async {
+                        let id = *remove.screen_id.first().context("缺少待删除屏幕")?;
+                        session.remove_virtual(id).await
+                    }
+                    .await;
+                    report_display_result(&result);
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::RemoveVirtualDisplayRsp(
+                            PbDisplayResult {
+                                error_code: if result.is_ok() { 0 } else { -1 },
+                            }
+                            .encode_to_vec(),
+                        ),
+                    ));
+                }
+                Some(PbRpcRequestPayload::EnterSuperScreen(enter)) => {
+                    let mut code = 502;
+                    let result = async {
+                        anyhow::ensure!(matches!(enter.reason, 1 | 2), "无效超级屏原因");
+                        let size = enter.resolution.context("缺少超级屏尺寸")?;
+                        anyhow::ensure!(size.width > 0 && size.height > 0, "无效超级屏尺寸");
+                        let dpi = if enter.dpi_scale <= 0 {
+                            0
+                        } else {
+                            enter.dpi_scale as u32
+                        };
+                        if enter.reason == 2 {
+                            let fps = enter
+                                .enter_fps
+                                .as_ref()
+                                .context("缺少超级屏帧率")?
+                                .fps_count;
+                            anyhow::ensure!((1..=144).contains(&fps), "无效超级屏帧率");
+                        }
+                        code = 501;
+                        session
+                            .enter_super(size.width as u32, size.height as u32, dpi, true)
+                            .await?;
+                        if let Some(fps) = enter.enter_fps.filter(|_| enter.reason == 2) {
+                            session.set_fps_limit(fps.fps_count as u32);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    report_display_result(&result);
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::EnterSuperScreenRep(
+                            PbDisplayResult {
+                                error_code: if result.is_ok() { 0 } else { code },
+                            }
+                            .encode_to_vec(),
+                        ),
+                    ));
+                }
+                Some(PbRpcRequestPayload::QuitSuperScreen(_)) => {
+                    let result = session.quit_super().await;
+                    report_display_result(&result);
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::QuitSuperScreen(
+                            PbDisplayResult {
+                                error_code: if result.is_ok() { 0 } else { -1 },
+                            }
+                            .encode_to_vec(),
+                        ),
+                    ));
+                }
+                Some(PbRpcRequestPayload::SendVideoTrack(tracks)) => {
+                    let result = session.register(&tracks.video_track_index).await;
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::SendVideoTrackRsp(PbSendVideoTrackResponse {
+                            error_code: if result.is_ok() { 0 } else { -1 },
+                        }),
+                    ));
+                }
+                Some(PbRpcRequestPayload::CaptureSetting(setting)) => {
+                    session.refresh()?;
+                    let ids: Vec<_> = if setting.screen_id == EXISTING_SESSION_TRACKS {
+                        session
+                            .slots
+                            .iter()
+                            .filter_map(|s| {
+                                s.screen.as_ref().or(s.suspended.as_ref()).map(|s| s.id)
+                            })
+                            .collect()
+                    } else {
+                        vec![setting.screen_id]
+                    };
+                    let mut errors = Vec::new();
+                    for id in ids {
+                        match apply_setting(
+                            session,
+                            id,
+                            setting.clone(),
+                            request.request_header.clone(),
+                            &message,
+                        )
+                        .await
+                        {
+                            Ok(mut result) => errors.append(&mut result),
+                            Err(error) => errors.push(PbError {
+                                error_code: -2,
+                                error_message: format!("{error:#}"),
+                                ..Default::default()
+                            }),
+                        }
+                    }
+                    if errors.is_empty() {
+                        errors.push(PbError::default());
+                    }
+                    if errors.iter().all(|e| {
+                        matches!(e.error_code, 0 | -3 | -6)
+                            || (e.error_code == -5
+                                && serde_json::from_str::<serde_json::Value>(&e.error_detail)
+                                    .ok()
+                                    .is_some_and(|v| {
+                                        v.get("error_code").and_then(|c| c.as_i64()) == Some(0)
+                                    }))
+                    }) {
+                        // S456550/5419C0 update the connection's capture defaults
+                        // even for a single-screen request. Existing other tracks
+                        // keep their settings; newly attached captures inherit it.
+                        let config = session
+                            .slots
+                            .iter()
+                            .find(|s| {
+                                s.screen
+                                    .as_ref()
+                                    .or(s.suspended.as_ref())
+                                    .is_some_and(|s| s.id == setting.screen_id)
+                            })
+                            .or_else(|| {
+                                session
+                                    .slots
+                                    .iter()
+                                    .find(|s| s.screen.is_some() || s.suspended.is_some())
+                            })
+                            .map(|s| *lock(&s.config));
+                        if let Some(config) = config {
+                            session.set_media_default(config);
+                        }
+                    }
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::CaptureSetting(PbCaptureSettingResponse { errors }),
+                    ));
+                }
+                _ => (),
+            }
+        }
+    }
+    let screen = session
+        .slots
+        .iter()
+        .find_map(|s| s.screen.clone())
+        .unwrap_or_else(|| session.handshake_source());
+    let slot = &session.slots[session.active_slot(screen.id).unwrap_or(0)];
+    super::receive(
+        bytes,
+        control,
+        &screen,
+        &mut lock(&slot.config),
+        &slot.negotiated,
+    )
+}
+
+async fn apply_setting(
+    session: &mut Screens,
+    id: i32,
+    setting: PbCaptureSettingRequest,
+    header: Option<PbRequestHeader>,
+    message: &PbControlMessage,
+) -> Result<Vec<PbError>> {
+    let mut info = session.info(id)?;
+    let index = session
+        .active_slot(id)
+        .or_else(|| {
+            (setting.screen_id == EXISTING_SESSION_TRACKS)
+                .then(|| {
+                    session
+                        .slots
+                        .iter()
+                        .position(|s| s.suspended.as_ref().is_some_and(|s| s.id == id))
+                })
+                .flatten()
+        })
+        .context("显示器尚未开始采集")?;
+    let size = if setting.resolution_type == 3 {
+        Some((info.initial.width, info.initial.height))
+    } else if setting.resolution_width > 0 && setting.resolution_height > 0 {
+        Some((
+            setting.resolution_width as u32,
+            setting.resolution_height as u32,
+        ))
+    } else {
+        None
+    };
+    anyhow::ensure!((0..=4).contains(&setting.resolution_type), "无效分辨率策略");
+    anyhow::ensure!(
+        (setting.resolution_width > 0) == (setting.resolution_height > 0),
+        "不完整的分辨率参数"
+    );
+    anyhow::ensure!(
+        setting.screen_id != EXISTING_SESSION_TRACKS || (size.is_none() && setting.dpi_scale == 0),
+        "显示设置需要具体屏幕标识"
+    );
+    let mut proposed = info.screen.clone();
+    if let Some((width, height)) = size {
+        proposed.width = width;
+        proposed.height = height;
+    }
+    let slot = &session.slots[index];
+    let mut validation = *lock(&slot.config);
+    let validation_errors = configure_media(
+        setting.clone(),
+        &proposed,
+        header.clone(),
+        message,
+        &mut validation,
+        &slot.negotiated,
+    )?;
+    if validation_errors
+        .iter()
+        .any(|e| matches!(e.error_code, -1 | -2))
+    {
+        return Ok(validation_errors);
+    }
+    let mut conversion = false;
+    let mut current_id = id;
+    if let Some(size) = size {
+        if size != (info.screen.width, info.screen.height) {
+            let supported = info.target.as_ref().is_some_and(|t| {
+                t.modes
+                    .iter()
+                    .any(|m| m.width == size.0 && m.height == size.1)
+            });
+            if info.kind == 0 && !supported && setting.resolution_type == 2 {
+                let result = session.enter_super(size.0, size.1, 0, false).await;
+                match result {
+                    Ok(id) => {
+                        current_id = id;
+                        conversion = true;
+                    }
+                    Err(error) => {
+                        return Ok(vec![PbError {
+                            error_code: -5,
+                            error_message: format!("{error:#}"),
+                            error_detail: serde_json::json!({"error_code":501}).to_string(),
+                        }]);
+                    }
+                }
+            } else {
+                current_id = session.set_resolution(info.clone(), size.0, size.1).await?;
+            }
+            info = session.info(current_id)?;
+        }
+    }
+    if size.is_some() && (2..=4).contains(&setting.resolution_type) {
+        session
+            .displays
+            .resolution_choice(
+                info.screen.identity.clone().context("缺少显示目标身份")?,
+                setting.resolution_type,
+            )
+            .await?;
+    }
+    if setting.dpi_scale != 0 {
+        let target = info.target.clone().context("缺少DPI显示目标")?;
+        let dpi = if setting.dpi_scale == -1 {
+            target.dpi.as_ref().context("DPI不可用")?.recommended
+        } else {
+            u32::try_from(setting.dpi_scale).context("无效DPI")?
+        };
+        session.displays.set_dpi(target, dpi).await?;
+    }
+    session.refresh()?;
+    let screen = session.info(current_id)?.screen;
+    anyhow::ensure!(session.authorization().requested(), "被控许可已失效");
+    let slot = &session.slots[session.active_slot(current_id).unwrap_or(index)];
+    let mut errors = configure_media(
+        setting,
+        &screen,
+        header,
+        message,
+        &mut lock(&slot.config),
+        &slot.negotiated,
+    )?;
+    if conversion {
+        errors.push(PbError {
+            error_code: -5,
+            error_detail: serde_json::json!({"error_code":0}).to_string(),
+            ..Default::default()
+        });
+    }
+    Ok(errors)
+}
+
+fn report_display_result(result: &Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(%error,"host display operation rejected or failed");
+    }
+}
+
+fn configure_media(
+    mut setting: PbCaptureSettingRequest,
+    screen: &Screen,
+    header: Option<PbRequestHeader>,
+    message: &PbControlMessage,
+    config: &mut VideoConfig,
+    negotiated: &crate::features::host::format::Negotiated,
+) -> Result<Vec<PbError>> {
+    // Native mode changes and their failure are handled above. Reuse only the
+    // established codec/quality negotiation, with the new actual mode snapshot.
+    setting.screen_id = screen.id;
+    setting.resolution_width = screen.width as i32;
+    setting.resolution_height = screen.height as i32;
+    setting.resolution_pixel_width = screen.width as i32;
+    setting.resolution_pixel_height = screen.height as i32;
+    setting.resolution_type = 1;
+    setting.dpi_scale = 0;
+    let bytes = PbControlMessage {
+        seq: message.seq,
+        timestamp: message.timestamp,
+        payload: Some(PbPayload::RpcRequest(
+            PbRpcRequest {
+                request_header: header,
+                payload: Some(PbRpcRequestPayload::CaptureSetting(setting)),
+            }
+            .encode_to_vec(),
+        )),
+    }
+    .encode_to_vec();
+    let result = super::receive(&bytes, false, screen, config, negotiated)?;
+    let mut errors = Vec::new();
+    for bytes in result.messages {
+        if let Some(PbPayload::RpcResponse(response)) =
+            PbControlMessage::decode(bytes.as_slice())?.payload
+        {
+            if let Some(PbRpcResponsePayload::CaptureSetting(response)) = response.payload {
+                errors.extend(response.errors);
+            }
+        }
+    }
+    Ok(errors)
+}

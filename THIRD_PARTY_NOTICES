@@ -45,21 +45,21 @@ Source: https://github.com/kixelated/goog_cc
 
 FFmpeg-derived Rust decoding and DXVA parameter implementations:
 LGPL-2.1-or-later.
-Principal locations: src/decoder/h264-core/ and
-src/decoder/platform/windows/rust_dxva/.
+Principal locations: crates/h264-core/ and
+src/platform/windows/decoder/rust_dxva/.
 Retained original author attributions include Michael Niedermayer, Loren
 Merritt, Daniel Kang, Laurent Aimar, and Hendrik Leppkes. File-specific
 sources and attributions must also be preserved. Rust ports, SIMD
 optimizations, parameter mapping, and other covered modifications do not
 become subject to the project's reserved-rights terms instead.
 Reference: FFmpeg 8.0.3, https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz
-License texts: src/decoder/COPYING.FFmpeg and
-src/decoder/h264-core/COPYING.LGPLv2.1.
+License texts: src/media/decoder/COPYING.FFmpeg and
+crates/h264-core/COPYING.LGPLv2.1.
 
 Platform adaptation derived from mediaway-decoder 0.1.8:
 MIT OR Apache-2.0.
 Original notice: Copyright (c) 2026 NyxWays.
-License texts: src/decoder/LICENSE-MIT and src/decoder/LICENSE-APACHE.
+License texts: src/media/decoder/LICENSE-MIT and src/media/decoder/LICENSE-APACHE.
 The original crate was removed, but licenses and attributions for existing
 derivative code remain applicable. mediaway-common 0.1.8 is still a
 dependency, licensed under MIT OR Apache-2.0.
@@ -79,9 +79,9 @@ modifications are reflected in the source. The included Abseil reference
 version is 20230125.3, with absl/LICENSE (Apache-2.0) retained. Included
 Opus public headers retain third_party/opus/src/COPYING.
 
-src/audio/dsp.rs is a Rust adaptation of the floating-point, quality-5
+src/media/audio/dsp.rs is a Rust adaptation of the floating-point, quality-5
 resampler in SpeexDSP 1.2.1 (Jean-Marc Valin, 2007). Filter coefficients,
-algorithm provenance and BSD terms are preserved in src/audio/COPYING.SpeexDSP.
+algorithm provenance and BSD terms are preserved in src/media/audio/COPYING.SpeexDSP.
 The implementation owns a stereo history and fractional phase, with no native
 Speex library or FFI. Original C source is kept only for offline comparison.
 Source: https://downloads.xiph.org/releases/speex/speexdsp-1.2.1.tar.gz
@@ -151,8 +151,8 @@ Its original LICENSE is retained in vendor/vpl-sys/dispatcher/LICENSE.
 No AMD/Intel encoder runtime binaries or official UU shader binaries are
 distributed by these additions; the actual encoder is the installed driver.
 
-The bitrate budget table in src/host/parameters.rs and the repair-count tables
-src/host/fec-high-rtt.bin and fec-low-rtt.bin contain interoperability parameters
+The bitrate budget table in src/features/host/parameters.rs and the repair-count tables
+src/features/host/fec-high-rtt.bin and fec-low-rtt.bin contain interoperability parameters
 obtained from the currently analyzed UU V4.7.3 SDK distributed
 with 4.41.2.2602 (VA 180FA0D70, 18107EEE0 and 181085BE0). See the settings and sender analysis for
 dimensions and selection rules. These parameters are not claimed as
@@ -161,7 +161,7 @@ original project material or covered by the goog_cc/NVENC binding licenses.
 
 Rust H.264 desktop encoder
 
-The realtime encoder in src/decoder/h264-core shares the existing LGPL-2.1-or-later
+The realtime encoder in crates/h264-core shares the existing LGPL-2.1-or-later
 FFmpeg-derived interpolation, prediction, deblocking and CAVLC tables with the
 decoder. Selected forward/inverse transform primitives use the already declared
 oxideav-h264 0.1.8 dependency. Frame decisions, motion search, rate control and
@@ -173,3 +173,16 @@ organization are adapted from Cisco OpenH264 source and verified
 against UU's active producer/consumer paths. The original BSD-2-Clause notice is
 retained in licenses/openh264-algorithms.txt. This attribution does not add the
 OpenH264 C/C++ library or bindings to the application.
+
+
+Optional SudoVDA display driver
+
+The unchanged SudoVDA 1.10.9.289 package is extracted from Apollo v0.4.6
+(https://github.com/ClassicOldSong/Apollo/releases/tag/v0.4.6). Driver source:
+https://github.com/SudoMaker/SudoVDA. Its author offers their changes under
+MIT / CC0 / Public Domain; see assets/drivers/sudovda/SudoVDA-README.md.
+Microsoft Windows driver sample contributions retain their MS-PL license,
+Copyright (c) 2015 Microsoft; see assets/drivers/sudovda/Microsoft-LICENSE.txt.
+The package is embedded for explicit optional installation only; it is not
+an official UU driver, and installing it requires separate administrator
+consent and trust of its self-signed publisher certificate.

@@ -35,7 +35,7 @@ pub(crate) struct Controller {
     last_view: Option<sdk::Viewport>,
     enabled: bool,
     error: Option<String>,
-    input: Option<crate::remote_input::RemoteInput>,
+    input: Option<crate::features::remote_input::RemoteInput>,
     leases: std::collections::BTreeMap<u64, super::input::Lease>,
     input_owner: Option<u64>,
     input_allowed: bool,
@@ -293,7 +293,7 @@ impl Controller {
         ctx: &egui::Context,
         open: &mut bool,
         style: fn(&mut egui::Ui),
-        _control: &crate::stream_control::StreamControlHandle,
+        _control: &crate::features::stream_control::StreamControlHandle,
     ) {
         self.update();
         if !*open {
@@ -483,12 +483,12 @@ impl Controller {
     }
     pub fn input_context(
         &mut self,
-        input: crate::remote_input::RemoteInput,
+        input: crate::features::remote_input::RemoteInput,
         owner: u64,
         allowed: bool,
     ) {
         self.input_allowed = allowed
-            && input.mode() != crate::remote_input::MouseMode::View
+            && input.mode() != crate::features::remote_input::MouseMode::View
             && input.relative_mode()
             && self.pending.is_none();
         self.input = Some(input.clone());

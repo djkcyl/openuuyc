@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use openuuyc::rtp_capture::load_capture;
+use openuuyc::diagnostics::rtp_capture::load_capture;
 use serde_json::json;
 use webrtc::util::marshal::Unmarshal;
 

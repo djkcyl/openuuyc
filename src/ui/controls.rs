@@ -1,7 +1,11 @@
 //! Shared control appearance for the center, viewer menus and node editor.
 use super::theme::{self, HOVER, LINE, MUTED, SURFACE, TEXT};
 use egui::{Color32, RichText, Stroke, vec2};
+mod diagnostics;
 mod dialogs;
+pub(crate) use diagnostics::{
+    diagnostics_action, diagnostics_empty, diagnostics_label, diagnostics_row, diagnostics_table,
+};
 mod inputs;
 mod notices;
 pub(crate) use inputs::{number_input, singleline};
@@ -30,6 +34,14 @@ pub(crate) use viewer_caption::{ViewerCaptionIcon, viewer_caption_button};
 pub const HEIGHT: f32 = theme::CONTROL_HEIGHT;
 pub const COMPACT_HEIGHT: f32 = theme::COMPACT_HEIGHT;
 pub const ACCENT: Color32 = theme::ACCENT;
+
+/// Pages use the whole remaining viewport for both scrolling and content.
+/// Preserve page IDs so each page retains independent scrolling state.
+pub(crate) fn page_scroll(id: impl egui::AsIdSalt) -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .auto_shrink([false, false])
+}
 
 pub(crate) fn paint_file_icon(p: &egui::Painter, r: egui::Rect, color: Color32, folder: bool) {
     let c = r.center();
@@ -1116,6 +1128,28 @@ pub fn menu_row(
 
 pub fn secondary(label: &str) -> egui::Button<'_> {
     egui::Button::new(label).min_size(vec2(64.0, HEIGHT))
+}
+
+/// Transient status and optional action share a fixed row without moving the form.
+pub(crate) fn status_row(
+    ui: &mut egui::Ui,
+    message: &str,
+    color: Color32,
+    action: Option<&str>,
+) -> bool {
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), egui::Sense::hover());
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let clicked = action.is_some_and(|label| row.add(secondary(label)).clicked());
+    row.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.add(egui::Label::new(RichText::new(message).color(color)).truncate())
+            .on_hover_text(message);
+    });
+    clicked
 }
 
 /// Keep setting edits inside the same menu row, without adding a button footer.

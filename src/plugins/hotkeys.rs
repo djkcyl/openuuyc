@@ -326,7 +326,7 @@ pub fn valid(binding: &Binding) -> bool {
     (matches!(binding.key, 1 | 2 | 4 | 5 | 6) || (8..=254).contains(&binding.key))
         && !matches!(binding.key,16..=18|91..=92|160..=165)
         && binding.modifiers <= 15
-        && crate::viewer_shortcuts::match_key(binding.key, binding.modifiers).is_none()
+        && crate::application::viewer_shortcuts::match_key(binding.key, binding.modifiers).is_none()
 }
 pub fn label(binding: &Binding) -> String {
     let mut words = Vec::new();
