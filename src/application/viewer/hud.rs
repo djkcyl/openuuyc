@@ -17,6 +17,9 @@ pub(in crate::application) fn show_performance_overlay(
         PerformancePanelMode::Detailed => {
             performance_panel::show(ctx, performance, &stats, grid_id)
         }
+        PerformancePanelMode::Alerts => {
+            super::performance_alerts::show(ctx, performance.history_identity(), &stats, grid_id)
+        }
     }
 }
 

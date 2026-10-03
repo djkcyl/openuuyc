@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod audio_view;
 pub(crate) mod device_switch;
+mod performance_alerts;
 mod performance_panel;
 pub(crate) use audio_view::AudioView;
 mod screens;
