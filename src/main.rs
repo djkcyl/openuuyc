@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(
     non_snake_case,
     reason = "The executable uses the OpenUUYC product name."
@@ -35,25 +35,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[cfg(windows)]
     #[command(hide = true)]
     Notification { uri: String },
     /// 打开卸载窗口，选择是否保留驱动和本机数据
+    #[cfg(windows)]
     Uninstall {
         #[arg(long, hide = true)]
         parent: Option<u32>,
     },
+    #[cfg(windows)]
     #[command(hide = true)]
     Service,
+    #[cfg(windows)]
     #[command(hide = true)]
     HostResident {
         #[arg(long)]
         parent: u32,
     },
+    #[cfg(windows)]
     #[command(hide = true)]
     DisplayAgent {
         #[arg(long)]
         parent: u32,
     },
+    #[cfg(windows)]
     #[command(hide = true)]
     InputAgent {
         #[arg(long)]
@@ -61,6 +67,7 @@ enum Commands {
         #[arg(long)]
         parent: u32,
     },
+    #[cfg(windows)]
     #[command(hide = true)]
     CaptureAgent {
         #[arg(long)]
@@ -68,6 +75,7 @@ enum Commands {
         #[arg(long)]
         parent: u32,
     },
+    #[cfg(windows)]
     #[command(hide = true)]
     Component {
         #[arg(value_enum)]
@@ -141,23 +149,10 @@ enum Commands {
 fn main() -> Result<()> {
     let parsed = Cli::try_parse();
 
-    if !parsed.as_ref().is_ok_and(|cli| {
-        matches!(
-            &cli.command,
-            Some(
-                Commands::PluginHost { .. }
-                    | Commands::Notification { .. }
-                    | Commands::PluginVideoHost
-                    | Commands::DisplayRecovery { .. }
-                    | Commands::Component { .. }
-                    | Commands::Service
-                    | Commands::HostResident { .. }
-                    | Commands::DisplayAgent { .. }
-                    | Commands::InputAgent { .. }
-                    | Commands::CaptureAgent { .. }
-            )
-        )
-    }) {
+    if !parsed
+        .as_ref()
+        .is_ok_and(|cli| cli.command.as_ref().is_some_and(internal_role))
+    {
         attach_parent_console();
     }
     let cli = parsed.unwrap_or_else(|error| error.exit());
@@ -169,6 +164,7 @@ fn main() -> Result<()> {
         transport: media::TransportChoice::Auto,
     });
 
+    #[cfg(windows)]
     if let Commands::Notification { uri } = &command {
         return app::notification_activation(uri);
     }
@@ -183,7 +179,11 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let _logging = if matches!(command, Commands::Uninstall { .. }) {
+    #[cfg(windows)]
+    let uninstalling = matches!(command, Commands::Uninstall { .. });
+    #[cfg(not(windows))]
+    let uninstalling = false;
+    let _logging = if uninstalling {
         None
     } else {
         Some(logging::init(
@@ -193,6 +193,7 @@ fn main() -> Result<()> {
     };
     tracing::info!(target: "openuuyc", version = env!("CARGO_PKG_VERSION"), "application started");
 
+    #[cfg(windows)]
     if let Commands::Component {
         component,
         operation,
@@ -228,17 +229,25 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let result = match command {
+        #[cfg(windows)]
         Commands::Uninstall { parent } => openuuyc::application::uninstall_application(parent),
+        #[cfg(windows)]
         Commands::Component { .. } => unreachable!(),
+        #[cfg(windows)]
         Commands::Service => openuuyc::application::host_service(),
+        #[cfg(windows)]
         Commands::HostResident { parent } => openuuyc::application::host_resident(parent),
+        #[cfg(windows)]
         Commands::DisplayAgent { parent } => openuuyc::application::display_agent(parent),
+        #[cfg(windows)]
         Commands::InputAgent { pipe, parent } => openuuyc::application::input_agent(&pipe, parent),
+        #[cfg(windows)]
         Commands::CaptureAgent { pipe, parent } => {
             openuuyc::application::capture_agent(&pipe, parent)
         }
         Commands::DisplayRecovery { token } => openuuyc::application::display_recovery(&token),
         Commands::PluginVideoHost => openuuyc::plugins::video::host(),
+        #[cfg(windows)]
         Commands::Notification { .. } => {
             unreachable!("notification activation is handled before application startup")
         }
@@ -292,19 +301,42 @@ fn main() -> Result<()> {
         tracing::error!(target: "openuuyc", error = %format_args!("{error:#}"), "application stopped with an error");
     }
     drop(_instance);
+    #[cfg(windows)]
     if result.is_ok() && openuuyc::application::take_installed_handoff() {
         openuuyc::application::launch_installed(std::env::args_os().skip(1))?;
     }
     result
 }
 
-fn attach_parent_console() {
-    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+/// Roles the executable starts itself in, which report to their parent
+/// rather than to a console of their own.
+fn internal_role(command: &Commands) -> bool {
+    match command {
+        Commands::PluginHost { .. }
+        | Commands::PluginVideoHost
+        | Commands::DisplayRecovery { .. } => true,
+        #[cfg(windows)]
+        Commands::Notification { .. }
+        | Commands::Component { .. }
+        | Commands::Service
+        | Commands::HostResident { .. }
+        | Commands::DisplayAgent { .. }
+        | Commands::InputAgent { .. }
+        | Commands::CaptureAgent { .. } => true,
+        _ => false,
+    }
+}
 
+fn attach_parent_console() {
     // Attach before printing clap output. Explorer has no parent console;
     // inherited STARTF_USESTDHANDLES pipes/files remain redirected on attach.
     // Never allocate a console just for launching the device center or viewer.
-    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+    // A Linux process is started from its terminal and keeps those streams.
 }
 
 async fn connect_device(

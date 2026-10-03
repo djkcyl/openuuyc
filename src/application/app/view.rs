@@ -8,6 +8,8 @@ use egui::{Align, Color32, FontId, RichText, Sense, Stroke, vec2};
 mod about;
 mod assist;
 mod assist_components;
+// Installing the service and drivers is part of the Windows setup.
+#[cfg(windows)]
 mod components;
 mod device_details;
 mod device_visuals;
@@ -59,6 +61,7 @@ impl Page {
 
 #[derive(Default)]
 pub(super) struct CenterUi {
+    #[cfg(windows)]
     pub(super) components: components::Manager,
     page: Page,
     device_lists: [devices::ListUi; 2],
@@ -802,11 +805,14 @@ impl DeviceCenterApp {
                 ui.with_layout(egui::Layout::bottom_up(Align::Min), |ui| {
                     self.draw_account_footer(ui);
                     ui.add_space(8.0);
-                    let active = self
-                        .host
-                        .as_ref()
-                        .is_some_and(|h| h.status().session_active);
-                    self.center_ui.components.button(ui, active);
+                    #[cfg(windows)]
+                    {
+                        let active = self
+                            .host
+                            .as_ref()
+                            .is_some_and(|h| h.status().session_active);
+                        self.center_ui.components.button(ui, active);
+                    }
                 });
             });
     }
@@ -1245,11 +1251,14 @@ impl DeviceCenterApp {
                         });
                 },
             );
-            let active = self
-                .host
-                .as_ref()
-                .is_some_and(|h| h.status().session_active);
-            self.center_ui.components.management(ui, active);
+            #[cfg(windows)]
+            {
+                let active = self
+                    .host
+                    .as_ref()
+                    .is_some_and(|h| h.status().session_active);
+                self.center_ui.components.management(ui, active);
+            }
         });
     }
 

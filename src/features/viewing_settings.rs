@@ -16,12 +16,15 @@ pub(crate) enum PerformancePanelMode {
     Hidden,
     Compact,
     Detailed,
+    /// Nothing until a metric turns abnormal, then only that metric.
+    Alerts,
 }
 impl PerformancePanelMode {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Compact => Self::Detailed,
-            Self::Detailed => Self::Hidden,
+            Self::Detailed => Self::Alerts,
+            Self::Alerts => Self::Hidden,
             Self::Hidden => Self::Compact,
         }
     }

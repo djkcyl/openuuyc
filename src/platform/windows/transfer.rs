@@ -66,7 +66,7 @@ impl Transfer {
     pub fn new(source: &ID3D11Device, destination: &ID3D11Device, frame: &Frame) -> Result<Self> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            frame.texture.GetDesc(&mut desc);
+            frame.image.GetDesc(&mut desc);
         }
         let engine = match Gpu::new(source, destination, desc, true)
             .or_else(|_| Gpu::new(source, destination, desc, false))
@@ -92,7 +92,7 @@ impl Transfer {
     ) -> bool {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            frame.texture.GetDesc(&mut desc);
+            frame.image.GetDesc(&mut desc);
         }
         self.source == *source
             && self.destination == *destination
@@ -110,7 +110,7 @@ impl Transfer {
         }
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            frame.texture.GetDesc(&mut desc);
+            frame.image.GetDesc(&mut desc);
         }
         self.engine = Engine::Staging(Staging::new(&self.source, &self.destination, desc)?);
         self.copy(frame)
@@ -162,7 +162,7 @@ impl Staging {
     }
     fn copy(&self, frame: &Frame) -> Result<Delivery> {
         unsafe {
-            self.source.CopyResource(&self.read, &frame.texture);
+            self.source.CopyResource(&self.read, &frame.image);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.source
                 .Map(&self.read, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
@@ -180,7 +180,7 @@ impl Staging {
             );
             self.source.Unmap(&self.read, 0);
             let mut frame = frame.clone();
-            frame.texture = self.write.clone();
+            frame.image = self.write.clone();
             Ok(Delivery {
                 frame,
                 retire: None,
@@ -504,7 +504,7 @@ impl Gpu {
             let value = slot.value.fetch_add(1, Ordering::AcqRel) + 1;
             slot.source
                 .context
-                .CopyResource(&slot.source_texture, &frame.texture);
+                .CopyResource(&slot.source_texture, &frame.image);
             slot.source_issued.store(value, Ordering::Release);
             slot.source.context.Signal(&slot.source_fence11, value)?;
             slot.source.context.Flush();
@@ -529,7 +529,7 @@ impl Gpu {
                 .Wait(&slot.destination_fence11, value)?;
             slot.leased.store(true, Ordering::Release);
             let mut output = frame.clone();
-            output.texture = slot.destination_texture.clone();
+            output.image = slot.destination_texture.clone();
             Ok(Some(Delivery {
                 frame: output,
                 retire: Some((slot.clone(), value)),

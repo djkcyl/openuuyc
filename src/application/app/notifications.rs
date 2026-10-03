@@ -23,7 +23,10 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Gui => "程序浮窗",
-            Self::Windows => "Windows 通知",
+            // The variant keeps its stored name; Linux delivers it through
+            // the desktop's notification service.
+            Self::Windows if cfg!(windows) => "Windows 通知",
+            Self::Windows => "系统通知",
             Self::Both => "两者同时",
         }
     }
@@ -161,7 +164,7 @@ fn clean(s: &str) -> String {
 impl Center {
     pub fn new(ctx: &egui::Context) -> Self {
         let (sender, events) = mpsc::channel();
-        crate::platform::windows::notifications::set_activation_sink(Some(sender.clone()));
+        crate::platform::notifications::set_activation_sink(Some(sender.clone()));
         Self {
             mode: Mode::Gui,
             error: None,
@@ -468,7 +471,7 @@ impl Drop for Opening {
 impl Drop for Center {
     fn drop(&mut self) {
         lock(&self.view).clear();
-        crate::platform::windows::notifications::set_activation_sink(None);
+        crate::platform::notifications::set_activation_sink(None);
     }
 }
 struct Popup {

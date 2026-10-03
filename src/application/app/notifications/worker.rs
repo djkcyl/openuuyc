@@ -1,6 +1,6 @@
 //! Serial notification I/O, coalesced outside the UI and media threads.
 use super::{Action, Card, Mode, Verb};
-use crate::platform::windows::notifications::{Native, Toast, ToastAction};
+use crate::platform::notifications::{Native, Toast, ToastAction};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -21,9 +21,7 @@ pub(super) struct Worker {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 fn path() -> Result<std::path::PathBuf> {
-    let base =
-        std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").context("无法确定通知设置目录")?);
-    anyhow::ensure!(base.is_absolute(), "通知设置目录无效");
+    let base = crate::platform::paths::local_app_data().context("无法确定通知设置目录")?;
     Ok(base.join("OpenUUYC").join("notifications.json"))
 }
 fn load() -> Result<Mode> {

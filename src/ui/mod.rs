@@ -1,9 +1,13 @@
-//! Windows GUI ownership and shared application controls.
+//! Desktop GUI ownership and shared application controls.
 use anyhow::Result;
 
 pub(crate) mod chrome;
-use crate::platform::graphics as d3d11;
+pub(crate) mod gfx;
 
+#[cfg(windows)]
+mod tray;
+#[cfg(target_os = "linux")]
+#[path = "tray_linux.rs"]
 mod tray;
 pub(crate) mod window_manager;
 mod windows;

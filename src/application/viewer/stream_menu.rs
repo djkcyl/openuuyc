@@ -927,16 +927,30 @@ crate::ui::controls::observe_notice(ui.ctx(), "audio-output-disconnected", "音�
                                 }
                                 if monitoring {
                                     ui.horizontal(|ui| {
-                                        for (mode, label) in [
-                                            (super::PerformancePanelMode::Compact, "简洁"),
-                                            (super::PerformancePanelMode::Detailed, "详细"),
+                                        for (mode, label, hint) in [
+                                            (
+                                                super::PerformancePanelMode::Compact,
+                                                "简洁",
+                                                "常驻显示主要指标",
+                                            ),
+                                            (
+                                                super::PerformancePanelMode::Detailed,
+                                                "详细",
+                                                "常驻显示趋势图和全部指标",
+                                            ),
+                                            (
+                                                super::PerformancePanelMode::Alerts,
+                                                "异常时",
+                                                "平时不显示；丢包、延迟、抖动、卡顿、丢帧等任一指标异常时，只显示异常的那几项",
+                                            ),
                                         ] {
                                             if ui
                                                 .add_sized(
-                                                    [(WIDTH - 6.0) / 2.0, ROW_HEIGHT],
+                                                    [(WIDTH - 12.0) / 3.0, ROW_HEIGHT],
                                                     egui::Button::new(label)
                                                         .selected(view.performance_mode == mode),
                                                 )
+                                                .on_hover_text(hint)
                                                 .clicked()
                                             {
                                                 view.performance_mode = mode;

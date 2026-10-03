@@ -225,7 +225,7 @@ impl Handle {
     }
     pub(crate) async fn apply_remote(
         &self,
-        snapshot: crate::platform::windows::host_service::resident::Snapshot,
+        snapshot: crate::platform::host_service::resident::Snapshot,
     ) {
         self.media.replace(snapshot.capabilities).await;
         let mut state = lock(&self.ownership);
@@ -267,7 +267,7 @@ impl Handle {
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<()> {
-        if crate::platform::windows::host_service::resident::managed() {
+        if crate::platform::host_service::resident::managed() {
             return Ok(());
         }
         tokio::task::spawn_blocking(super::displays::recovery::recover_abandoned).await??;
@@ -413,7 +413,7 @@ impl Handle {
     pub(crate) async fn refresh_audio_devices(&self) {
         let result =
             tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<super::audio::Device>> {
-                let devices = crate::platform::windows::loopback::Devices::new()?;
+                let devices = crate::platform::loopback::Devices::new()?;
                 let mut result: Vec<_> = devices
                     .list()?
                     .into_iter()
@@ -522,9 +522,9 @@ impl Handle {
                     self.assistance.settings(),
                 )
             };
-            let result = if crate::platform::windows::host_service::resident::managed() {
-                crate::platform::windows::host_service::resident::request(
-                    crate::platform::windows::host_service::resident::Request::Settings {
+            let result = if crate::platform::host_service::resident::managed() {
+                crate::platform::host_service::resident::request(
+                    crate::platform::host_service::resident::Request::Settings {
                         account: self.account.clone(),
                         allowed,
                         encoding,
@@ -564,7 +564,7 @@ impl Handle {
         }
     }
     pub(crate) fn retry(&self) {
-        if crate::platform::windows::host_service::resident::managed() {
+        if crate::platform::host_service::resident::managed() {
             lock(&self.ownership).remote_action = Some(true);
             return;
         }
@@ -604,7 +604,7 @@ impl Handle {
             }));
     }
     pub(crate) fn disconnect(&self) {
-        if crate::platform::windows::host_service::resident::managed() {
+        if crate::platform::host_service::resident::managed() {
             lock(&self.ownership).remote_action = Some(false);
             return;
         }
@@ -862,6 +862,18 @@ impl Lease {
     }
     pub(crate) fn input_status(&self, backend: Option<&str>, error: Option<String>) {
         self.modify(|state| {
+            // Input failures otherwise only change a status field; record each
+            // transition so a controller that "cannot move anything" can be
+            // explained from the log.
+            if state.status.input_backend.as_deref() != backend {
+                tracing::info!(backend, "host input backend");
+            }
+            if state.status.input_error != error {
+                match &error {
+                    Some(error) => tracing::warn!(backend, %error, "host input failed"),
+                    None => tracing::info!(backend, "host input recovered"),
+                }
+            }
             state.status.input_backend = backend.map(str::to_owned);
             state.status.input_error = error;
         });

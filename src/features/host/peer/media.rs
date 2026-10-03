@@ -59,7 +59,7 @@ impl Worker {
         negotiated: Arc<crate::features::host::format::Negotiated>,
         transport: crate::features::host::transport::Transport,
         publication: tokio::sync::watch::Sender<Published>,
-        pointer: Arc<Mutex<Option<crate::platform::windows::cursor_shape::Snapshot>>>,
+        pointer: Arc<Mutex<Option<crate::platform::cursor_shape::Snapshot>>>,
     ) -> Result<Self> {
         let keyframe = Arc::new(AtomicBool::new(true));
         let request_keyframe = keyframe.clone();
@@ -467,7 +467,9 @@ impl Worker {
                     drop(clock);
                 }
                 if complete && !send_cancel.is_cancelled() && send_handle.requested() {
-                    if frame.keyframe { awaiting_keyframe = false; }
+                    if frame.keyframe {
+                        awaiting_keyframe = false;
+                    }
                     sent_first_frame.store(true, Ordering::Release);
                     send_handle.frame();
                 }

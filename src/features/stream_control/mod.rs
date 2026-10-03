@@ -421,6 +421,9 @@ struct PendingCapturePreferences {
 struct StreamControlState {
     peer_clipboard: i32,
     clipboard_files_allowed: bool,
+    /// Last reported value of the clipboard gate, so the diagnostic only fires
+    /// when it changes.
+    clipboard_ready_reported: bool,
     remote_upgrade: Option<crate::features::remote_upgrade::RemoteUpgrade>,
     annotation: annotation::Annotation,
     custom_bitrate_limit: u32,
@@ -432,6 +435,10 @@ struct StreamControlState {
         tokio::sync::watch::Sender<Option<crate::features::viewing_settings::DevicePreferences>>,
     device_persistence_error: Option<String>,
     restore_input_pending: bool,
+    #[allow(
+        dead_code,
+        reason = "Smart mouse waits for special_game_mouse instead of inferring from a hidden cursor."
+    )]
     remote_cursor: crate::features::remote_cursor::RemoteCursorState,
     peer_mouse_relative: Option<bool>,
     cursor_sync_needed: bool,
@@ -501,6 +508,7 @@ impl StreamControlHandle {
         let state = StreamControlState {
             peer_clipboard: 0,
             clipboard_files_allowed: true,
+            clipboard_ready_reported: false,
             remote_upgrade: None,
             annotation: Default::default(),
             custom_bitrate_limit: MAX_CUSTOM_BITRATE_MBPS,

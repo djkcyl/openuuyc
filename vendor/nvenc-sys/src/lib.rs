@@ -1,7 +1,12 @@
-//! Windows x64 NVENC ABI. No CUDA or NVDEC dependency or static driver linking.
+//! x86-64 NVENC ABI (Windows and Linux). No CUDA or NVDEC dependency or
+//! static driver linking: the driver library is loaded at run time.
+//!
+//! The bindings were generated for Windows x64; the header's types are fixed
+//! width except `GUID.Data1` and `RECT`, which use C `long` and are declared
+//! here with the 32-bit width both platforms' headers mean.
 #![allow(warnings)]
-#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
-compile_error!("OpenUUYC NVENC bindings require Windows x64");
+#[cfg(not(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64")))]
+compile_error!("OpenUUYC NVENC bindings require Windows or Linux on x86-64");
 pub mod sys {
     mod guid;
     mod version;

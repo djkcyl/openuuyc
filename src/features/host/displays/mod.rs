@@ -498,13 +498,7 @@ fn validate_modes(modes: &[(u32, u32)]) -> Result<()> {
 fn remove_owned(driver: &Driver, guid: &str) -> Result<()> {
     match driver.remove(uuid::Uuid::parse_str(guid)?) {
         Ok(()) => Ok(()),
-        Err(error)
-            if error
-                .downcast_ref::<windows::core::Error>()
-                .is_some_and(|e| e.code() == windows::core::HRESULT::from_win32(1168)) =>
-        {
-            Ok(())
-        }
+        Err(error) if display::virtual_driver::already_removed(&error) => Ok(()),
         Err(error) => Err(error),
     }
 }

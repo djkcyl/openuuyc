@@ -154,6 +154,12 @@ struct State {
     stopping: bool,
     mode: MouseMode,
     relative: bool,
+    /// Set once a window failed to take the pointer. Relative motion is only
+    /// meaningful while this client owns the pointer exclusively; without that
+    /// grab the local pointer keeps moving on its own and the deltas drift away
+    /// from wherever the remote one ended up. Stored as the refusal so the
+    /// derived `Default` starts out permitting it.
+    relative_denied: bool,
     owner: Option<u64>,
     held: [bool; 5],
     // Marked before handing DOWN to transport. A concurrent stop must release
@@ -178,7 +184,7 @@ struct State {
     recovering: bool,
     throttle: bool,
     next_motion_at: Option<Instant>,
-    deadline_timer: Option<crate::platform::windows::input::deadline::Timer>,
+    deadline_timer: Option<crate::platform::deadline::Timer>,
     polling_warning: Option<polling::Warning>,
     listeners: Vec<Weak<dyn Fn() + Send + Sync>>,
 }
@@ -205,9 +211,7 @@ impl RemoteInput {
             return Ok(());
         }
         let timer = if enabled {
-            Some(crate::platform::windows::input::deadline::Timer::new(
-                self.wake.clone(),
-            )?)
+            Some(crate::platform::deadline::Timer::new(self.wake.clone())?)
         } else {
             None
         };
@@ -405,6 +409,24 @@ impl RemoteInput {
     }
     pub fn relative_mode(&self) -> bool {
         self.lock().relative
+    }
+    pub fn relative_available(&self) -> bool {
+        !self.lock().relative_denied
+    }
+    /// Reported by the window that tried to take the pointer. It stays off for
+    /// the rest of the session: whatever holds the pointer is outside this
+    /// process, and retrying would only swing the mode back and forth.
+    /// Only an X11/Wayland pointer grab can be refused by another client;
+    /// the Windows player's raw-input capture has no such failure.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub fn set_relative_available(&self, available: bool) {
+        let mut s = self.lock();
+        if s.relative_denied != available {
+            return;
+        }
+        s.relative_denied = !available;
+        drop(s);
+        self.repaint();
     }
     pub fn set_relative_mode(&self, relative: bool) {
         let mut s = self.lock();

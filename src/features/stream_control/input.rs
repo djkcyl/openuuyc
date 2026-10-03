@@ -82,6 +82,15 @@ impl StreamControlHandle {
         self.cursor.hidden()
     }
 
+    /// Whether the host is drawing its own pointer into the captured frames.
+    /// While it is not, nothing but this client can put a pointer on screen.
+    /// The Linux player draws the remote pointer itself and asks; the Windows
+    /// player shows it as the system cursor, which needs no such check.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(crate) fn remote_cursor_captured(&self) -> bool {
+        lock(&self.shared).baseline.cursor_capture
+    }
+
     pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
         self.change_mouse_mode(mode, true)
     }
@@ -296,14 +305,32 @@ impl StreamControlHandle {
         {
             self.disable_microphone_locked(state);
         }
+        let clipboard_ready = state.viewing_enabled
+            && state.pb_connected
+            && state.control_channel_open
+            && state.text_channel_open
+            && state.mouse_transport_connected
+            && state.peer_clipboard >= 1
+            && state.mouse.mode() != MouseMode::View;
+        // Clipboard sync is gated on seven separate conditions, and a session
+        // that never syncs looks identical whichever one is missing.
+        if clipboard_ready != state.clipboard_ready_reported {
+            state.clipboard_ready_reported = clipboard_ready;
+            tracing::debug!(
+                ready = clipboard_ready,
+                viewing = state.viewing_enabled,
+                pb = state.pb_connected,
+                control = state.control_channel_open,
+                text = state.text_channel_open,
+                mouse_transport = state.mouse_transport_connected,
+                peer = state.peer_clipboard,
+                mode = ?state.mouse.mode(),
+                files_allowed = state.clipboard_files_allowed,
+                "剪贴板同步条件"
+            );
+        }
         self.clipboard.policy(
-            state.viewing_enabled
-                && state.pb_connected
-                && state.control_channel_open
-                && state.text_channel_open
-                && state.mouse_transport_connected
-                && state.peer_clipboard >= 1
-                && state.mouse.mode() != MouseMode::View,
+            clipboard_ready,
             state.peer_clipboard >= 2 && state.clipboard_files_allowed,
         );
         if !state.viewing_enabled {
@@ -311,6 +338,10 @@ impl StreamControlHandle {
         }
         let mode = state.mouse.mode();
         let (relative, wanted) = mouse_policy(state, mode);
+        // Relative motion is only correct while this client holds the pointer.
+        // A window that could not take it says so, and absolute positioning is
+        // then the only honest way to aim, whatever the policy would prefer.
+        let relative = relative && state.mouse.relative_available();
         if mode == MouseMode::Smart && state.mouse.relative_mode() != relative {
             state.mouse.set_relative_mode(relative);
         }
@@ -345,7 +376,15 @@ pub(super) fn mouse_policy(state: &StreamControlState, mode: MouseMode) -> (bool
         MouseMode::Smart => match state.peer_mouse_relative {
             Some(true) => (true, true),
             Some(false) => (false, false),
-            None => (state.remote_cursor.hidden(), false),
+            // The host says a game took the mouse with `special_game_mouse`,
+            // and that report is what pairs relative input with the host
+            // drawing its own pointer into the picture. Until it arrives,
+            // absolute positioning is the only coherent choice: inferring
+            // relative input from a hidden cursor fires on an ordinary desktop
+            // -- Windows hides the pointer for anyone typing, for as long as
+            // they type -- and leaves the client sending deltas while nothing
+            // draws a pointer to aim with.
+            None => (false, false),
         },
     }
 }

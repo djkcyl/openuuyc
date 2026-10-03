@@ -205,4 +205,5 @@ pub(crate) struct FrameTiming {
     pub encode_finished: std::time::Instant,
 }
 
+pub(crate) mod nvenc;
 pub(crate) mod rate;

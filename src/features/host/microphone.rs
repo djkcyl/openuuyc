@@ -3,7 +3,7 @@ mod routing;
 use super::{Lease, lock};
 use crate::{
     media::audio::neteq,
-    platform::windows::virtual_audio::{Bridge, State},
+    platform::virtual_audio::{Bridge, State},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -326,7 +326,7 @@ impl Playout {
     }
 }
 fn run(shared: Arc<Shared>, commands: mpsc::Receiver<Command>) {
-    let _priority = crate::platform::windows::virtual_audio::AudioPriority::enter()
+    let _priority = crate::platform::virtual_audio::AudioPriority::enter()
         .map_err(|error| {
             tracing::warn!(%error,"virtual microphone multimedia scheduling unavailable");
         })

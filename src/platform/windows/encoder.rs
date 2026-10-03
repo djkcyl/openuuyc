@@ -145,9 +145,7 @@ pub(crate) fn probe(
                     None
                 };
                 let frames = encoder.encode(
-                    delivery
-                        .as_ref()
-                        .map_or(&frame.texture, |d| &d.frame.texture),
+                    delivery.as_ref().map_or(&frame.image, |d| &d.frame.image),
                     i * 333333,
                     true,
                 )?;

@@ -1,7 +1,6 @@
 use crate::media::decode_api::{DecodeError, DecoderMode, VideoDecoderConfig};
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
-use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvRange, YuvStandardMatrix, yuv_nv12_to_rgba};
 
 use crate::media::video_color::{ColorMatrix, RenderColor};
@@ -39,6 +38,10 @@ pub(crate) enum DecoderOutputIssue {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "Only the Windows decoder produces GPU surfaces.")
+)]
 pub(crate) enum DecodedSurface {
     CpuNv12(Bytes),
 
@@ -48,8 +51,20 @@ pub(crate) enum DecodedSurface {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "Only the Windows presenter draws GPU surfaces.")
+)]
 pub(crate) enum RenderSurface {
     CpuRgba8(Vec<Rgba8>),
+
+    /// Packed NV12 handed to the renderer as-is; the shader converts it.
+    /// Doing that on the GPU saves a full-frame CPU conversion per picture.
+    #[cfg(not(windows))]
+    CpuNv12 {
+        data: Bytes,
+        color: RenderColor,
+    },
 
     D3D11(windows_surface::D3D11Surface),
 }
@@ -71,8 +86,15 @@ impl DecodedSurface {
             Self::CpuI444(data) => {
                 i444_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
             }
+            #[cfg(windows)]
             Self::CpuNv12(data) => {
                 nv12_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
+            }
+            // The Linux renderer samples NV12 directly; only validate the layout.
+            #[cfg(not(windows))]
+            Self::CpuNv12(data) => {
+                nv12_layout(width, height, &data)?;
+                Ok(RenderSurface::CpuNv12 { data, color })
             }
 
             Self::D3D11(surface) => Ok(RenderSurface::D3D11(surface)),
@@ -81,7 +103,7 @@ impl DecodedSurface {
 }
 
 pub(crate) struct NativeVideoDecoder {
-    decoder: Box<WindowsVideoDecoder>,
+    decoder: Box<PlatformDecoder>,
     frame_reader: FrameReader,
     candidate: DecoderCandidate,
     label: String,
@@ -92,7 +114,11 @@ pub(crate) struct NativeVideoDecoder {
 /// Local implementation choices, never serialized as invented UU decoder IDs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DecoderCandidate {
+    #[cfg(windows)]
     WindowsD3d11,
+    /// VA-API through the local driver: NVDEC, Intel or AMD.
+    #[cfg(not(windows))]
+    LinuxVaapi,
 
     Software,
 }
@@ -101,7 +127,10 @@ impl DecoderCandidate {
     pub(crate) fn available(codec: VideoCodec, prefer_hardware: bool) -> Vec<Self> {
         let mut candidates = Vec::new();
         if prefer_hardware {
+            #[cfg(windows)]
             candidates.push(Self::WindowsD3d11);
+            #[cfg(not(windows))]
+            candidates.push(Self::LinuxVaapi);
         }
 
         match codec {
@@ -185,6 +214,13 @@ impl NativeVideoDecoder {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        not(windows),
+        allow(
+            unused_variables,
+            reason = "The D3D11 writer and its format probe are Windows-only."
+        )
+    )]
     pub(crate) fn open_candidate(
         candidate: DecoderCandidate,
         codec: VideoCodec,
@@ -202,9 +238,29 @@ impl NativeVideoDecoder {
         let depth = format.map_or(8, |f| f.bit_depth_luma);
         let chroma = format.map_or(1, |f| f.chroma_format_idc);
         match candidate {
+            #[cfg(not(windows))]
+            DecoderCandidate::LinuxVaapi => {
+                let config = decoder_config(
+                    codec,
+                    width,
+                    height,
+                    DecoderMode::Hardware,
+                    None,
+                    extra_data,
+                );
+                let decoder = PlatformDecoder::open(&config)?;
+                Ok(Self {
+                    decoder: Box::new(decoder),
+                    frame_reader: FrameReader::Cpu,
+                    candidate,
+                    label: format!("{} 硬解", platform_label()),
+                    software_slot: None,
+                })
+            }
+            #[cfg(windows)]
             DecoderCandidate::WindowsD3d11 => {
                 let supports = |writer: &windows_surface::D3D11SurfaceWriter| {
-                    WindowsVideoDecoder::probe_format(
+                    PlatformDecoder::probe_format(
                         writer.device_handle(),
                         codec,
                         width,
@@ -243,12 +299,21 @@ impl NativeVideoDecoder {
                     None,
                     extra_data,
                 );
-                let decoder = WindowsVideoDecoder::open(&config)?;
+                let decoder = PlatformDecoder::open(&config)?;
+                // Windows uploads AV1's packed formats through its texture
+                // writer. The Linux presenter draws every software format it
+                // advertises straight from the CPU.
+                #[cfg(windows)]
                 let frame_reader = if codec == VideoCodec::Av1 {
                     FrameReader::Windows(
                         surface_writer.map_or_else(windows_surface::D3D11SurfaceWriter::new, Ok)?,
                     )
                 } else {
+                    FrameReader::Cpu
+                };
+                #[cfg(not(windows))]
+                let frame_reader = {
+                    let _ = surface_writer;
                     FrameReader::Cpu
                 };
                 Ok(Self {
@@ -282,6 +347,7 @@ impl NativeVideoDecoder {
         }
     }
 
+    #[cfg(windows)]
     fn open_windows_hardware(
         codec: VideoCodec,
         width: u32,
@@ -297,7 +363,7 @@ impl NativeVideoDecoder {
             Some(reader.device_handle()),
             extra_data,
         );
-        let backend = WindowsVideoDecoder::open(&config)?;
+        let backend = PlatformDecoder::open(&config)?;
         Ok(Self {
             decoder: Box::new(backend),
             frame_reader: FrameReader::Windows(reader),
@@ -340,13 +406,25 @@ impl NativeVideoDecoder {
     }
 }
 
+#[cfg_attr(
+    not(windows),
+    allow(
+        unused_variables,
+        reason = "Only the GPU arm, which is Windows-only, reads the frame reader."
+    )
+)]
 fn poll_platform_decoder(
-    decoder: &mut WindowsVideoDecoder,
+    decoder: &mut PlatformDecoder,
     frame_reader: &mut FrameReader,
 ) -> DecodedBatch {
     let mut batch = DecodedBatch::default();
 
-    use crate::platform::decoder::{WindowsCpuFormat, WindowsDecodedFrame};
+    #[cfg(not(windows))]
+    use crate::platform::decoder::{CpuFormat, PlatformDecodedFrame};
+    #[cfg(windows)]
+    use crate::platform::decoder::{
+        WindowsCpuFormat as CpuFormat, WindowsDecodedFrame as PlatformDecodedFrame,
+    };
     loop {
         let frame = match decoder
             .poll_owned_frame()
@@ -363,7 +441,8 @@ fn poll_platform_decoder(
         };
         let ready_at = std::time::Instant::now();
         let (pts, width, height, surface) = match frame {
-            WindowsDecodedFrame::Gpu(frame) => (
+            #[cfg(windows)]
+            PlatformDecodedFrame::Gpu(frame) => (
                 frame.pts(),
                 frame.width(),
                 frame.height(),
@@ -374,16 +453,15 @@ fn poll_platform_decoder(
                     _ => Err(anyhow!("GPU decoder output has no owning device")),
                 },
             ),
-            WindowsDecodedFrame::Cpu(frame) => {
+            PlatformDecodedFrame::Cpu(frame) => {
                 let surface = if let FrameReader::Windows(writer) = frame_reader {
                     writer.upload_cpu(&frame).map(DecodedSurface::D3D11)
                 } else {
                     match frame.format {
-                        WindowsCpuFormat::Nv12 => {
-                            nv12_layout(frame.width, frame.height, &frame.data)
-                                .map(|_| DecodedSurface::CpuNv12(frame.data))
-                        }
-                        WindowsCpuFormat::I444 => Ok(DecodedSurface::CpuI444(frame.data)),
+                        CpuFormat::Nv12 => nv12_layout(frame.width, frame.height, &frame.data)
+                            .map(|_| DecodedSurface::CpuNv12(frame.data)),
+                        CpuFormat::I444 => Ok(DecodedSurface::CpuI444(frame.data)),
+                        #[allow(unreachable_patterns, reason = "Linux decodes only these two.")]
                         _ => Err(anyhow!("software video format requires a texture uploader")),
                     }
                 };
@@ -416,7 +494,7 @@ pub(crate) fn detect_native_decoder_support(
     std::thread::spawn(move || {
         let mut capabilities = Vec::new();
         if profile.hardware_decode
-            && let Ok(writers) = windows_surface::D3D11SurfaceWriter::available()
+            && let Ok(probe) = hardware_probe()
         {
             for (codec, id) in [
                 (VideoCodec::H264, 1),
@@ -429,16 +507,7 @@ pub(crate) fn detect_native_decoder_support(
                 for chroma in [1, 3] {
                     for depth in [8, 10] {
                         for &(width, height) in QUALITY_DIMENSIONS[1..].iter().rev() {
-                            if writers.iter().any(|writer| {
-                                WindowsVideoDecoder::probe_format(
-                                    writer.device_handle(),
-                                    codec,
-                                    width as u32,
-                                    height as u32,
-                                    depth,
-                                    chroma,
-                                )
-                            }) {
+                            if probe(codec, width as u32, height as u32, depth, chroma) {
                                 capabilities.push(CodecCapability {
                                     video_codec: id,
                                     width,
@@ -468,6 +537,20 @@ pub(crate) fn detect_native_decoder_support(
                 });
             }
         }
+        // The Linux presenter draws software frames as NV12, which the AV1
+        // decoder produces for 8-bit 4:2:0 only.
+        #[cfg(not(windows))]
+        if profile.codec.accepts(VideoCodec::Av1) {
+            capabilities.push(CodecCapability {
+                video_codec: 5,
+                width: 1920,
+                height: 1080,
+                chroma_sampling: 1,
+                bit_depth: 8,
+                codec_impl: 37,
+            });
+        }
+        #[cfg(windows)]
         if profile.codec.accepts(VideoCodec::Av1) {
             if let Ok(writer) = windows_surface::D3D11SurfaceWriter::new() {
                 for chroma in [1, 3] {
@@ -505,12 +588,38 @@ pub(crate) fn detect_native_decoder_support(
     .map_err(|_| anyhow!("native capability probe thread panicked"))?
 }
 
+/// A closure that answers whether the platform decodes a format in hardware.
+/// On Windows every D3D11 device is asked; on Linux the VA-API driver is.
+#[cfg(windows)]
+fn hardware_probe() -> Result<impl Fn(VideoCodec, u32, u32, u8, u8) -> bool> {
+    let writers = windows_surface::D3D11SurfaceWriter::available()?;
+    Ok(move |codec, width, height, depth, chroma| {
+        writers.iter().any(|writer| {
+            PlatformDecoder::probe_format(
+                writer.device_handle(),
+                codec,
+                width,
+                height,
+                depth,
+                chroma,
+            )
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn hardware_probe() -> Result<impl Fn(VideoCodec, u32, u32, u8, u8) -> bool> {
+    Ok(|codec, width, height, depth, chroma| {
+        crate::platform::decoder::probe_hardware(codec, width, height, depth, chroma)
+    })
+}
+
 fn decoder_config(
     codec: VideoCodec,
     width: u32,
     height: u32,
     mode: DecoderMode,
-    gpu_device: Option<ID3D11Device>,
+    gpu_device: Option<crate::platform::decoder::GpuDevice>,
     extra_data: Bytes,
 ) -> VideoDecoderConfig {
     VideoDecoderConfig {
@@ -592,6 +701,10 @@ fn i444_to_rgba_pixels(
     Ok(pixels)
 }
 
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "The Linux renderer converts NV12 on the GPU.")
+)]
 fn nv12_to_rgba_pixels(
     width: u32,
     height: u32,
@@ -631,14 +744,27 @@ fn nv12_to_rgba_pixels(
     Ok(pixels)
 }
 
-use crate::platform::decoder::WindowsVideoDecoder;
+#[cfg(windows)]
+type PlatformDecoder = crate::platform::decoder::WindowsVideoDecoder;
+#[cfg(not(windows))]
+type PlatformDecoder = crate::platform::decoder::LinuxVideoDecoder;
 
 fn platform_label() -> &'static str {
-    "DXVA11"
+    #[cfg(windows)]
+    {
+        "DXVA11"
+    }
+    #[cfg(not(windows))]
+    {
+        "VA-API"
+    }
 }
 
 enum FrameReader {
     Cpu,
-
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "Only the D3D11 decoder owns surfaces.")
+    )]
     Windows(windows_surface::D3D11SurfaceWriter),
 }

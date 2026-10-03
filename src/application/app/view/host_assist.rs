@@ -289,7 +289,9 @@ impl DeviceCenterApp {
         }
     }
     pub(super) fn host_assist_dialog(&mut self, ctx: &egui::Context) -> bool {
-        if self.assist_password_dialog(ctx) { return true; }
+        if self.assist_password_dialog(ctx) {
+            return true;
+        }
         self.assist_settings_dialog(ctx)
     }
 
