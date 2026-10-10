@@ -10,8 +10,8 @@ mod dialogs;
 pub(crate) use diagnostics::{
     diagnostics_action, diagnostics_empty, diagnostics_label, diagnostics_row, diagnostics_table,
 };
-mod inputs;
 mod host_notice;
+mod inputs;
 pub(crate) use host_notice::host_notice;
 mod input_rate;
 pub(crate) use input_rate::input_rate_warning;

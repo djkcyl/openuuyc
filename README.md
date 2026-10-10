@@ -2,7 +2,7 @@
 
 ![OpenUUYC](assets/banner.png)
 
-OpenUUYC 是用 Rust 编写的 UU 远程第三方 Windows 客户端，支持主控、被控和远程协助。
+OpenUUYC 是用 Rust 编写的 UU 远程第三方客户端，支持 Windows 和 Linux，支持主控、被控和远程协助。
 
 Windows 1.0 已进入 **RC** 阶段，重点完善兼容性、恢复和稳定性。**Windows 正式版完成后会适配 Linux 等其他平台。** 提前移植建议先通过 [Issue](https://github.com/djkcyl/openuuyc/issues) 沟通。
 
@@ -18,7 +18,7 @@ Windows 1.0 已进入 **RC** 阶段，重点完善兼容性、恢复和稳定性
 
 ## 能力表
 
-以下对应 **v1.0.0-rc.2**，功能取决于双方能力与权限。
+以下对应 **v1.0.0-rc.2** 在 **Windows x64** 上的能力，功能取决于双方能力与权限；Linux x64 需自行构建，差异见[下文](#linux-版差异)。
 
 | 功能 | 主控端 | 被控端 | 说明 |
 | --- | --- | --- | --- |
@@ -63,7 +63,25 @@ Windows 1.0 已进入 **RC** 阶段，重点完善兼容性、恢复和稳定性
 
 测试启动会降低驱动加载保护，程序不会自动修改这些设置。
 
+## Linux 版差异
+
+Linux 版可以登录、管理设备、观看和控制远端桌面，界面走 wgpu（Vulkan，缺失时回退 OpenGL），X11 与 Wayland 均可运行。本机被控在 Xorg 会话中可用。与 Windows 版相比：
+
+- **解码**：H.264 通过 VA-API 硬件解码（Constrained Baseline、Main、High，8 位 4:2:0），其余 H.264 格式与 AV1 使用 Rust 软件解码；AV1 软解只声明 8 位 4:2:0（播放窗口按 NV12 绘制），10 位与 4:4:4 不向对端声明。H.265 暂不支持。双方都有硬件编解码时协商优先选硬件。硬件解码需要对应的 VA-API 驱动。编解码首选中的解码方式与编码方式（硬件优先、仅硬件、仅软件）可用，但不能指定显卡：VA-API 与 NVENC 都使用桌面所在的显卡，显卡一栏显示为“自动”。
+- **剪贴板**：主控与被控两端都支持文字、图片与文件双向同步。粘贴远端复制的文件时，文件通过挂载在 `$XDG_RUNTIME_DIR` 下的只读 FUSE 文件系统按需读取，需要安装 `fuse3`。文件拖放在 Xorg 会话中可用，经 XDND 协议完成：作为主控，本地文件可拖进播放窗口（OpenUUYC 对端为实时拖放，官方被控为松手后投放），也可从 OpenUUYC 被控的桌面拖出到本地桌面，官方被控用队列浮窗发来的文件保存到下载目录；作为被控，主控拖入的文件在落点处投放给本机程序，向官方 Windows 主控发送文件时，在桌面上拖动文件会于屏幕顶部弹出待发送队列浮窗。远端文件以 FUSE 挂载的路径交给目标程序，读取时才按需传输；目标读完全部文件即视为完成，五分钟未读取则停止。Wayland 会话不支持文件拖放（提示“Wayland 桌面暂不支持拖放文件”）。拖出到本地或远端后不能再拖回原窗口接续原拖动（Windows 版经 OLE 支持），Linux 端不向对端声明这项能力，两端都把拖出视为结束；X11 拖放也没有拖动预览图。
+- **被控文件传输与电源**：独立文件传输在本机桌面用户身份下运行，路径为 Unix 路径，根目录列出 `/` 与 xdg 用户目录（文档、桌面、下载等），不允许经过符号链接。远程关机与重启经 systemd-logind 执行，受 polkit 策略约束（有其他用户登录时可能需要管理员授权）。远程开机的网络登记、局域网唤醒协助与网卡检查可用（检查只读：唤醒权限取自 sysfs，魔术包状态需安装 `ethtool`）；配置网卡需要 root，程序内不提供，请用 `sudo ethtool -s <网卡> wol g` 设置；开启远程开机时写入 `~/.config/autostart/openuuyc.desktop` 登录自启动。
+- **本机被控**：在已登录的桌面内运行。画面采集按 Sunshine 的优先级选择：Xorg 下先用 NVIDIA NvFBC（画面直接抓进显存交给 NVENC，仅在 NVENC 可用时选用），再到 X11 MIT-SHM，最后是 XDG 屏幕共享门户（PipeWire）；Wayland 下只用门户。门户第一次使用时需要在本机屏幕上点“共享”，授权会被记住（`~/.local/share/OpenUUYC/screencast-restore-token`，在系统隐私设置中可撤销）；可用环境变量 `OPENUUYC_CAPTURE`（如 `nvfbc`、`x11,portal`）指定顺序。编码优先用 NVENC（H.264/H.265，4:2:0 与 4:4:4，8 位；AV1 为 4:2:0 8 位，需要带 AV1 编码单元的显卡，尚未在这类显卡上实测），不可用时回退 Rust H.264 软件编码（没有 HDR 采集，因此没有 10 位）；桌面声音参照 Sunshine 经 PulseAudio 客户端接口录制所选播放设备的监听源（PulseAudio 与 PipeWire 均可）；该设备静音或音量为 0 时可能录不到声音；键鼠经 XTest 注入（按物理键位映射，文字输入不依赖键盘布局，移动端触摸按单指指针模拟），因此键鼠目前只在 Xorg 会话可用；支持物理多屏与通过 RandR 切换分辨率，退出时恢复。暂无 AMD/Intel 硬件编码、10 位与 HDR、KMS 采集、虚拟屏、超级屏、无显示器兜底屏、按显示器 DPI、远端麦克风与调整默认音频设备（OpenUUYC Audio 虚拟声卡是 Windows 驱动；Linux 上开启时会提示暂不支持），也没有后台服务，因此无法在登录界面或锁屏时被控。
+- **访问通知**：「系统通知」走桌面的 freedesktop 通知服务（GNOME、KDE 等），允许、拒绝、查看按钮直接回到正在运行的程序；「程序浮窗」在 X11 下放在主显示器右下角，Wayland 下由合成器决定位置。
+- **设备资料**：上报本机真实硬件，取自主机名、`/etc/os-release` 与内核版本、`/proc`、DMI 主板信息、PCI 显卡（按 `pci.ids` 命名）和默认路由所在网卡。SMBIOS 系统 UUID 只有 root 能读，因此系统标识由 `/etc/machine-id` 派生，重装系统后视为新设备。壁纸从 GNOME、Cinnamon、MATE 的 GSettings 或 KDE Plasma 配置读取，其他桌面会在诊断页提示暂不支持。
+- **安装与托盘**：没有“安装服务”，直接运行构建出的程序。关闭窗口隐藏到托盘（StatusNotifierItem；GNOME 需 AppIndicator 扩展，Ubuntu 默认启用），桌面没有托盘时关闭即退出。
+- **未接入**：批注与白板（主控发送和被控接收；被控收到批注请求会拒绝）、插件节点图、多显示器独立窗口、HDR、全局快捷键（快捷键仅在播放窗口获得焦点时生效），以及诊断页中的解码检查。
+- **凭据**：登录态保存在系统密钥环（Secret Service），需要运行 gnome-keyring、KWallet 等服务；没有明文回退。
+
+Wayland 下窗口的拖动与缩放由合成器接管，因此不支持窗口吸附等 Windows 专有行为。
+
 ## 构建
+
+### Windows
 
 需要 Rust stable（MSVC）、Visual Studio C++ 构建工具、Windows SDK、CMake 和 NASM，命令行工具需加入 PATH。H.264 软件编解码和 AV1 软件解码使用项目 Rust 核心及 SIMD 汇编。
 
@@ -76,6 +94,34 @@ cargo dist
 产物为 `target/dist/` 下的单文件 EXE。仅构建原生 EXE 可用 `cargo dist --native`；命令行参数见 `--help`。
 
 源码已包含签名驱动包和公钥证书，构建主程序不需要签名私钥。修改驱动及发布前验证见 [驱动构建说明](drivers/README.md)。
+
+### Linux
+
+需要 Rust stable（edition 2024）与 C/C++ 工具链。Ubuntu 22.04 及以上：
+
+```bash
+sudo apt install build-essential cmake clang nasm pkg-config libva-dev \
+    libasound2-dev libdbus-1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+    libwayland-dev libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev \
+    libgl1-mesa-dev libvulkan-dev libudev-dev libssl-dev fonts-noto-cjk fuse3
+git clone https://github.com/djkcyl/openuuyc.git
+cd openuuyc
+cargo build --release
+./target/release/OpenUUYC gui
+```
+
+`cargo dist` 只用于 Windows 打包，Linux 直接用 `cargo build`。
+
+打包为 deb（GitHub Actions 的 “Linux deb” 工作流在 Ubuntu 22.04 上构建同样的包，产物见运行页面的 Artifacts，打 `v*` 标签时附到 Release）：
+
+```bash
+cargo install cargo-deb
+cargo build --release --bin OpenUUYC
+cargo deb --no-build
+sudo apt install ./target/debian/openuuyc_*.deb
+```
+
+安装后从应用菜单启动，或运行 `OpenUUYC`。
 
 ## 命令行更新
 

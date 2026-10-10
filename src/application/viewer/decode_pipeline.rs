@@ -227,6 +227,8 @@ pub(super) fn decoder_manager(
     tracing::debug!(codec = ?config.codec, decoder = ?config.decoder,
         "native decoder initialization deferred until the first frame's parameter sets");
     let mut active_codec = config.codec;
+    // Only log the format when it actually changes, not once per frame.
+    let mut last_format_label: Option<String> = None;
     // Open against real SPS/PPS/VPS and coded dimensions. The local display
     // is only a startup hint, not the compressed stream's allocation geometry.
     let mut pool: Option<DecoderPool> = None;
@@ -434,6 +436,7 @@ pub(super) fn decoder_manager(
         }
         if frame.codec != active_codec {
             active_codec = frame.codec;
+            last_format_label = None;
             performance.set_video_codec(match active_codec {
                 VideoCodec::H264 => "H.264/AVC",
                 VideoCodec::H265 => "H.265/HEVC",
@@ -441,7 +444,12 @@ pub(super) fn decoder_manager(
             });
         }
         if let Some(format) = format {
-            performance.set_video_format(video_format_label(active_codec, format));
+            let label = video_format_label(active_codec, format);
+            if last_format_label.as_deref() != Some(label.as_str()) {
+                tracing::info!(format = %label, "video format in use");
+                last_format_label = Some(label.clone());
+            }
+            performance.set_video_format(label);
         }
 
         let cutover = cutover_state.evaluate(&frame, format);
@@ -644,6 +652,7 @@ pub(super) fn open_decoder_with_metadata(
 }
 
 pub(super) fn video_format_label(codec: VideoCodec, format: VideoFormatSignature) -> String {
+    let codec_kind = codec;
     let codec = match codec {
         VideoCodec::H264 => "H.264/AVC",
         VideoCodec::H265 => "H.265/HEVC",
@@ -664,9 +673,33 @@ pub(super) fn video_format_label(codec: VideoCodec, format: VideoFormatSignature
         String::new()
     };
     format!(
-        "{codec} · {}×{}{} · {chroma} · {}-bit",
-        format.visible_width, format.visible_height, coded, format.bit_depth_luma
+        "{codec} · {}×{}{} · {chroma} · {}-bit · {}",
+        format.visible_width,
+        format.visible_height,
+        coded,
+        format.bit_depth_luma,
+        profile_name(codec_kind, format.profile_idc)
     )
+}
+
+/// The profile decides which hardware decode path a backend can ask for, so it
+/// belongs next to the resolution in every diagnostic.
+fn profile_name(codec: VideoCodec, profile_idc: u8) -> String {
+    let name = match (codec, profile_idc) {
+        (VideoCodec::H264, 66) => "Baseline",
+        (VideoCodec::H264, 77) => "Main",
+        (VideoCodec::H264, 88) => "Extended",
+        (VideoCodec::H264, 100) => "High",
+        (VideoCodec::H264, 110) => "High 10",
+        (VideoCodec::H264, 122) => "High 4:2:2",
+        (VideoCodec::H264, 244) => "High 4:4:4",
+        (VideoCodec::H265, 1) => "Main",
+        (VideoCodec::H265, 2) => "Main 10",
+        (VideoCodec::H265, 3) => "Main Still Picture",
+        (VideoCodec::H265, 4) => "Range Extensions",
+        _ => return format!("profile {profile_idc}"),
+    };
+    format!("{name} profile")
 }
 
 pub(super) fn process_decoded_batch(

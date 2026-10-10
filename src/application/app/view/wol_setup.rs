@@ -18,7 +18,7 @@ fn issue_label(error: &str) -> String {
                 "Readback did not confirm ",
             ] {
                 if let Some(key) = error.strip_prefix(prefix) {
-                    let p = crate::platform::windows::wol::setup::Property {
+                    let p = crate::platform::wol::setup::Property {
                         key: key.into(),
                         ..Default::default()
                     };

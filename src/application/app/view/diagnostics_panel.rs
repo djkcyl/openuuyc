@@ -8,6 +8,8 @@ enum Tab {
     Device,
     Publication,
     Encoding,
+    // The decode check exercises DXVA11 adapters.
+    #[cfg(windows)]
     Decoding,
     Sessions,
     Wol,
@@ -43,6 +45,7 @@ impl DeviceCenterApp {
                     (Tab::Device, "设备概览"),
                     (Tab::Publication, "设备上报"),
                     (Tab::Encoding, "编码能力"),
+                    #[cfg(windows)]
                     (Tab::Decoding, "解码检查"),
                     (Tab::Sessions, "当前会话"),
                     (Tab::Wol, "远程开机"),
@@ -66,6 +69,7 @@ impl DeviceCenterApp {
                         Tab::Device => self.diagnostic_device(ui),
                         Tab::Publication => self.diagnostic_publication(ui),
                         Tab::Encoding => self.diagnostic_encoding(ui),
+                        #[cfg(windows)]
                         Tab::Decoding => self.diagnostic_decoding(ui),
                         Tab::Sessions => self.diagnostic_sessions(ui),
                         Tab::Wol => self.diagnostic_wol(ui),
@@ -114,7 +118,7 @@ impl DeviceCenterApp {
                 state.wol_error = None;
                 let ctx = ui.ctx().clone();
                 std::thread::spawn(move || {
-                    use crate::platform::windows::host_service::resident;
+                    use crate::platform::host_service::resident;
                     let result = if resident::managed() {
                         resident::call(resident::Request::RefreshWol).map(|_| ())
                     } else {
@@ -213,7 +217,7 @@ impl DeviceCenterApp {
                 state.publication_error = None;
                 let context = ui.ctx().clone();
                 std::thread::spawn(move || {
-                    use crate::platform::windows::host_service::resident;
+                    use crate::platform::host_service::resident;
                     let result = if resident::managed() {
                         resident::call(resident::Request::RefreshPublication).map(|_| ())
                     } else {
@@ -424,6 +428,7 @@ impl DeviceCenterApp {
         );
     }
 
+    #[cfg(windows)]
     fn diagnostic_decoding(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let busy = self.diagnostics.busy();
@@ -546,7 +551,7 @@ impl DeviceCenterApp {
             diagnostics_empty(ui, "暂无活动会话 · 连接后显示实际编解码信息");
             return;
         }
-        if let Some(host) = host.filter(|host| host.session_active) {
+        if let Some(host) = host {
             ui.strong("本机被控");
             diagnostics_row(ui, "连接状态", &host.message);
             diagnostics_row(

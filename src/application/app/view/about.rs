@@ -122,7 +122,9 @@ impl DeviceCenterApp {
                     "\n\nAppendix: OxideAV MIT license (retained AVC/HEVC syntax primitives)\n\n",
                     include_str!("../../../../crates/codec/kernels/h264/COPYING.OxideAV"),
                     "\n\nAppendix: AV1 syntax (ChromiumOS adaptation, BSD-3-Clause)\n\n",
-                    include_str!("../../../../crates/codec/kernels/av1/licenses/COPYING.ChromiumOS"),
+                    include_str!(
+                        "../../../../crates/codec/kernels/av1/licenses/COPYING.ChromiumOS"
+                    ),
                     "\n\nAppendix: AV1 syntax validation (dav1d adaptation)\n\n",
                     include_str!("../../../../crates/codec/kernels/av1/licenses/COPYING.dav1d"),
                     "\n\n",

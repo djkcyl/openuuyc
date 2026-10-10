@@ -1,27 +1,24 @@
-use super::d3d11::UiPresenter;
+use super::gfx::{UiPresenter, create_device, split_output};
 use super::window_manager::{self, Event, Repaint, Request};
 use super::{AppFactory, AppSession, WindowConfig};
-use crate::application::viewer::windows_presenter::ConnectingWindowsRunner;
+use crate::application::viewer::presenter::ConnectingWindowsRunner;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_11_0,
-};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice};
-use windows::core::Interface;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+#[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut builder = EventLoop::<Event>::with_user_event();
+    // The Windows keyboard hook needs to see raw messages before winit does.
+    #[cfg(windows)]
     builder.with_msg_hook(crate::application::viewer::desktop_input_message);
     let event_loop = builder.build().context("create desktop event loop")?;
     let _input_hook = crate::application::viewer::desktop_input_hook()?;
@@ -41,7 +38,7 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
     window_manager::install(Some(event_loop.create_proxy()));
     event_loop
         .run_app(&mut runner)
-        .context("run D3D11 desktop event loop")?;
+        .context("run desktop event loop")?;
     window_manager::install(None);
     crate::features::clipboard::shutdown();
     if let Some(error) = runner.main.error.take() {
@@ -72,6 +69,8 @@ struct DesktopWindow {
     tray: Option<super::tray::Tray>,
     exiting: bool,
     show_after_present: bool,
+    /// Read only on Windows; see its use after the first present.
+    #[cfg_attr(not(windows), allow(dead_code))]
     focus_after_present: bool,
     window_move: super::chrome::WindowMoveState,
     window_resize: super::chrome::WindowResizeState,
@@ -79,8 +78,9 @@ struct DesktopWindow {
     next_repaint: Option<Instant>,
     last_frame: Option<Instant>,
     interval: Duration,
-    window: Window,
-    notification: Option<crate::platform::windows::notifications::Placement>,
+    window: Arc<Window>,
+    notification: Option<crate::platform::notifications::Placement>,
+    floating: bool,
 }
 
 impl Drop for DesktopWindow {
@@ -111,7 +111,7 @@ impl Runner {
         // WindowConfig sizes describe page content; the shared caption occupies
         // client space now, so preserve the page's requested and minimum size.
         let mut viewport_builder = self.config.viewport.clone();
-        let caption_height = if self.config.notification {
+        let caption_height = if self.config.notification || self.config.floating {
             0.0
         } else {
             super::chrome::title_bar_height()
@@ -126,17 +126,15 @@ impl Runner {
             size.y += caption_height;
         }
         let min_inner_size = viewport_builder.min_inner_size;
-        let window = egui_winit::create_window(
+        let window = Arc::new(egui_winit::create_window(
             &context,
             event_loop,
             &viewport_builder.with_visible(false).with_decorations(false),
-        )?;
+        )?);
         super::chrome::configure_dwm_window(&window);
         super::branding::set_taskbar_icon(&window);
         let notification = if self.config.notification {
-            Some(crate::platform::windows::notifications::Placement::new(
-                &window,
-            )?)
+            Some(crate::platform::notifications::Placement::new(&window)?)
         } else {
             None
         };
@@ -151,12 +149,12 @@ impl Runner {
                 origin.y + (size.height as i64 - outer.height as i64).max(0) as i32 / 2,
             ));
         }
-        let (device, immediate, graphics) = create_device()?;
-        let presenter = UiPresenter::new(&window, device, immediate)?;
+        let graphics = create_device()?;
+        let presenter = UiPresenter::new(window.clone(), &graphics)?;
         let input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
-            &window,
+            &*window,
             Some(window.scale_factor() as f32),
             window.theme(),
             None,
@@ -181,12 +179,10 @@ impl Runner {
             .factory
             .take()
             .context("desktop factory already consumed")?;
-        let app = AppSession(factory(&context, Some(graphics)));
+        let app = AppSession(factory(&context, Some(graphics.label().to_owned())));
         let uses_tray = self.root && app.0.uses_tray();
         if uses_tray {
-            crate::application::app::instance::register_window(super::d3d11::window_hwnd(
-                &window,
-            )?)?;
+            crate::application::app::instance::register_window(&window)?;
         }
         let refresh = window
             .current_monitor()
@@ -200,8 +196,14 @@ impl Runner {
             input,
             viewport,
             close_requested: false,
+            // Without a notification area the window keeps its ordinary
+            // close behaviour rather than hiding where it cannot be reached.
             tray: if uses_tray {
-                Some(super::tray::Tray::new()?)
+                super::tray::Tray::new()
+                    .inspect_err(
+                        |error| tracing::warn!(error = %format!("{error:#}"), "tray unavailable"),
+                    )
+                    .ok()
             } else {
                 None
             },
@@ -216,6 +218,7 @@ impl Runner {
             interval: Duration::from_secs_f64(1000.0 / f64::from(refresh)),
             window,
             notification,
+            floating: self.config.floating,
         });
         if self.root {crate::application::bootstrap::ready();}
         let state = self.state.as_mut().expect("created desktop state");
@@ -282,7 +285,7 @@ impl DesktopWindow {
                     None,
                 );
             });
-            if self.notification.is_none() && self.window.fullscreen().is_none() {
+            if self.notification.is_none() && !self.floating && self.window.fullscreen().is_none() {
                 let alert = self.app.0.title_bar_alert();
                 super::chrome::title_bar_panel_alert(
                     ui,
@@ -307,7 +310,7 @@ impl DesktopWindow {
             self.app.0.ui(ui);
             super::controls::show_notices(ui.ctx());
         });
-        let (drawing, platform, mut viewports) = egui_directx11::split_output(output);
+        let (drawing, platform, mut viewports) = split_output(output);
         self.input.handle_platform_output(&self.window, platform);
         if let Some(root) = viewports.remove(&egui::ViewportId::ROOT) {
             for command in &root.commands {
@@ -376,11 +379,14 @@ impl DesktopWindow {
             if presented.ready() && self.show_after_present {
                 self.show_after_present = false;
                 self.window.set_visible(true);
+                // X11 and Wayland window managers apply their own focus
+                // policy to a newly mapped window.
+                #[cfg(windows)]
                 if std::mem::take(&mut self.focus_after_present) {
                     // Respect Windows foreground permission. winit's Windows
                     // focus_window() synthesizes Alt input; activation here
                     // needs only the permission granted by our launcher.
-                    if let Ok(hwnd) = super::d3d11::window_hwnd(&self.window) {
+                    if let Ok(hwnd) = super::gfx::window_hwnd(&self.window) {
                         let activated = unsafe {
                             windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd)
                         }
@@ -702,50 +708,4 @@ impl ApplicationHandler<Event> for Windows {
         self.windows.clear();
         self.main.exiting(event_loop);
     }
-}
-
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String)> {
-    let mut last_error = None;
-    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                driver,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[
-                    D3D_FEATURE_LEVEL_11_0,
-                    D3D_FEATURE_LEVEL_10_1,
-                    D3D_FEATURE_LEVEL_10_0,
-                ]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        match result {
-            Ok(()) => {
-                let device = device.context("D3D11 did not return a GUI device")?;
-                let context = context.context("D3D11 did not return a GUI context")?;
-                let adapter: IDXGIAdapter1 =
-                    unsafe { device.cast::<IDXGIDevice>()?.GetAdapter() }?.cast()?;
-                let desc = unsafe { adapter.GetDesc1() }?;
-                let length = desc
-                    .Description
-                    .iter()
-                    .position(|value| *value == 0)
-                    .unwrap_or(desc.Description.len());
-                let graphics = format!(
-                    "{} · D3D11",
-                    String::from_utf16_lossy(&desc.Description[..length])
-                );
-                return Ok((device, context, graphics));
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(anyhow!("create GUI D3D11 device: {:?}", last_error))
 }

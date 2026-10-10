@@ -322,11 +322,20 @@ pub(crate) fn encoding_adapters() -> Result<Vec<EncodingAdapter>> {
     }
 }
 
+/// The graphics device that captured frames live on.
+pub(crate) type Device = ID3D11Device;
+
+/// Whether `device` was removed (driver reset, adapter gone) and every
+/// resource on it has to be recreated.
+pub(crate) fn device_lost(device: &Device) -> bool {
+    unsafe { device.GetDeviceRemovedReason() }.is_err()
+}
+
 #[derive(Clone)]
 pub(crate) struct Frame {
     pub width: u32,
     pub height: u32,
-    pub texture: ID3D11Texture2D,
+    pub image: ID3D11Texture2D,
     pub captured: std::time::Instant,
     pub is_new: bool,
     pub hdr_metadata: Option<crate::media::video_color::HdrMetadata>,
@@ -926,7 +935,7 @@ impl Duplication {
                 Ok(Some(Frame {
                     width: desc.Width,
                     height: desc.Height,
-                    texture,
+                    image: texture,
                     captured,
                     _storage: None,
                     is_new: true,
@@ -987,7 +996,7 @@ impl Duplication {
         Ok(Some(Frame {
             width: output.Width,
             height: output.Height,
-            texture,
+            image: texture,
             captured: std::time::Instant::now(),
             is_new: pointer_changed,
             _storage: None,

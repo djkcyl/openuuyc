@@ -155,7 +155,7 @@ impl Session {
         let state = self.state.clone();
         let lease = self.lease.clone();
         let closed = self.closed.clone();
-        let activity = crate::platform::windows::host_service::activity::Work::new();
+        let activity = crate::platform::host_service::activity::Work::new();
         tokio::task::spawn_blocking(move || {
             let _activity = activity;
             let _serial = display::recovery::Serial::acquire()?;
@@ -448,7 +448,7 @@ impl Session {
             return Ok(());
         }
         let state = self.state.clone();
-        let activity = crate::platform::windows::host_service::activity::Work::new();
+        let activity = crate::platform::host_service::activity::Work::new();
         tokio::task::spawn_blocking(move || {
             let _activity = activity;
             let _serial = display::recovery::Serial::acquire()?;
@@ -505,13 +505,7 @@ fn validate_modes(modes: &[(u32, u32)]) -> Result<()> {
 fn remove_owned(driver: &Driver, guid: &str) -> Result<()> {
     match driver.remove(uuid::Uuid::parse_str(guid)?) {
         Ok(()) => Ok(()),
-        Err(error)
-            if error
-                .downcast_ref::<windows::core::Error>()
-                .is_some_and(|e| e.code() == windows::core::HRESULT::from_win32(1168)) =>
-        {
-            Ok(())
-        }
+        Err(error) if display::virtual_driver::already_removed(&error) => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -630,7 +624,7 @@ impl State {
             self.journal.applied = Some(self.journal.baseline.clone());
             self.journal.applied_dpi = self.journal.dpi.clone();
             self.save()?;
-            if let Err(error) = if crate::platform::windows::host_service::resident::is_owner() {
+            if let Err(error) = if crate::platform::host_service::resident::is_owner() {
                 // The service supervises this persistent owner and its next
                 // incarnation replays the durable recovery journal.
                 Ok(())

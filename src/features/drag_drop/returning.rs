@@ -1,5 +1,9 @@
 //! Restore the original press and OLE gesture; never construct a replacement copy.
 use super::*;
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "Only the Windows viewer offers the drag return.")
+)]
 impl Ticket {
     pub fn return_enter(
         &self,

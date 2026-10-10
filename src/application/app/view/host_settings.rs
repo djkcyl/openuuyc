@@ -51,7 +51,7 @@ impl DeviceCenterApp {
         }
     }
     pub(super) fn host_settings(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(!self.center_ui.components.busy(), |ui| {
+        ui.add_enabled_ui(!self.maintenance_busy(), |ui| {
             self.host_settings_controls(ui)
         });
         self.wol_setup_dialog(ui.ctx());
@@ -388,7 +388,7 @@ impl DeviceCenterApp {
         ] {
             // Service maintenance intentionally stops the resident endpoint;
             // its temporary polling failure is not a settings failure.
-            if self.center_ui.components.busy() {
+            if self.maintenance_busy() {
                 crate::ui::controls::clear_notice(ui.ctx(), (source, self.login_generation));
                 continue;
             }

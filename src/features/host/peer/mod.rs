@@ -31,7 +31,7 @@ use webrtc::{
 };
 
 pub(crate) struct Peer {
-    activity: Option<crate::platform::windows::host_service::activity::Work>,
+    activity: Option<crate::platform::host_service::activity::Work>,
     core: ConnectionCore,
     pub candidates: mpsc::UnboundedReceiver<RTCIceCandidateInit>,
     cancel: CancellationToken,
@@ -805,7 +805,7 @@ impl Peer {
             }
         });
         let capture_audio = audio.clone();
-        let activity = crate::platform::windows::host_service::activity::Work::new();
+        let activity = crate::platform::host_service::activity::Work::new();
         stream_tasks.push(tokio::spawn(async move {
             if let Err(error) = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
@@ -834,7 +834,10 @@ impl Peer {
             tokio::select! { _=feedback_cancel.cancelled()=>{}, _=feedback_audio.transmitter().feedback(audio_sender)=>{} }
         }));
         let peer_transport = transport.clone();
-        if crate::platform::windows::host_service::resident::is_owner() {
+        // Only the installed Windows service hosts on behalf of a separate
+        // user GUI process.
+        #[cfg(windows)]
+        if crate::platform::host_service::resident::is_owner() {
             let user_cancel = cancel.clone();
             let user_lease = handle.clone();
             stream_tasks.push(tokio::spawn(async move {
@@ -863,7 +866,7 @@ impl Peer {
         }
         construction.disarm();
         Ok(Self {
-            activity: Some(crate::platform::windows::host_service::activity::Work::new()),
+            activity: Some(crate::platform::host_service::activity::Work::new()),
             core,
             candidates,
             cancel,

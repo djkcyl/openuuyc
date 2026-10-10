@@ -1,5 +1,6 @@
 //! Clipboard permission and TEXT-channel ownership. Native work never runs on media/input threads.
 pub(crate) mod agent;
+#[cfg(windows)]
 mod frame;
 mod send;
 

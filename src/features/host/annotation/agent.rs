@@ -1,26 +1,66 @@
 //! Ordinary-user overlay execution; privileged residents only forward bounded commands.
-use super::{Action, Context, model::Model};
+//!
+//! Linux has no overlay renderer yet: opening a board is refused with a
+//! reason, everything else answers as an idle Windows host would.
+#[cfg(windows)]
+use super::model::Model;
+use super::{Action, Context};
+#[cfg(windows)]
 use crate::platform::windows::{
     annotation::Overlay,
     host_service::{pipe::Pipe, process, vault},
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
+#[cfg(windows)]
+use anyhow::ensure;
+#[cfg(windows)]
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(windows))]
+#[derive(Default)]
+pub(super) struct Backend;
+#[cfg(not(windows))]
+impl Backend {
+    pub fn interval(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+    pub fn exchange(
+        &mut self,
+        context: Context,
+        command: Option<Action>,
+        cancel: &CancellationToken,
+    ) -> Result<i32> {
+        if !context.allowed || cancel.is_cancelled() {
+            return Ok(4);
+        }
+        match command.as_ref().map(Action::toggle) {
+            None | Some(Some(false)) => Ok(0),
+            Some(Some(true)) => anyhow::bail!("Linux 暂不支持被控端批注（远程画笔）"),
+            Some(None) => Ok(4),
+        }
+    }
+}
+
+#[cfg(windows)]
 const PREFIX: &str = r"\\.\pipe\OpenUUYC.Annotation.";
+#[cfg(windows)]
 #[derive(Serialize, Deserialize)]
 struct Request {
     context: Context,
     command: Option<Action>,
 }
 
+#[cfg(windows)]
 pub(super) struct Backend {
     local: Option<Local>,
     remote: Option<Remote>,
     system: Option<bool>,
 }
+#[cfg(windows)]
 impl Default for Backend {
     fn default() -> Self {
         Self {
@@ -30,6 +70,7 @@ impl Default for Backend {
         }
     }
 }
+#[cfg(windows)]
 impl Backend {
     pub fn interval(&self) -> Duration {
         if self.local.as_ref().is_some_and(|l| l.model.animated()) {
@@ -101,6 +142,7 @@ impl Backend {
     }
 }
 
+#[cfg(windows)]
 struct Local {
     model: Model,
     context: Context,
@@ -110,6 +152,7 @@ struct Local {
     desktop: Option<(Instant, i32)>,
     last_animation: Instant,
 }
+#[cfg(windows)]
 impl Local {
     fn new() -> Result<Self> {
         Ok(Self {
@@ -179,6 +222,7 @@ impl Local {
     }
 }
 
+#[cfg(windows)]
 fn logged_on(session: u32) -> bool {
     use windows::{Win32::System::RemoteDesktop::*, core::PWSTR};
     if session == u32::MAX {
@@ -197,11 +241,13 @@ fn logged_on(session: u32) -> bool {
         available
     }
 }
+#[cfg(windows)]
 struct Remote {
     pipe: Pipe,
     agent: crate::platform::windows::host_service::user_backend::Lease,
     session: u32,
 }
+#[cfg(windows)]
 impl Remote {
     fn new(session: u32, cancel: &CancellationToken) -> Result<Self> {
         let name = format!("{PREFIX}{}", uuid::Uuid::new_v4().simple());
@@ -223,6 +269,7 @@ impl Remote {
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn run(name: &str, parent: u32) -> Result<()> {
     ensure!(name.starts_with(PREFIX) && name.len() < 150, "批注管道无效");
     ensure!(

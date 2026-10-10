@@ -95,7 +95,7 @@ pub(crate) fn probe(
                     fps: 30,
                 },
             };
-            let sample_device: ID3D11Device = unsafe { frame.texture.GetDevice()? };
+            let sample_device: ID3D11Device = unsafe { frame.image.GetDevice()? };
             let mut transfer = if device != sample_device {
                 Some(super::transfer::Transfer::new(
                     &sample_device,
@@ -137,9 +137,7 @@ pub(crate) fn probe(
                     None
                 };
                 let frames = encoder.encode(
-                    delivery
-                        .as_ref()
-                        .map_or(&frame.texture, |d| &d.frame.texture),
+                    delivery.as_ref().map_or(&frame.image, |d| &d.frame.image),
                     i * 333333,
                     true,
                 )?;

@@ -29,6 +29,7 @@ mod diagnostics;
 pub(crate) mod notifications;
 
 pub mod instance;
+#[cfg(windows)]
 pub(crate) mod maintenance;
 mod phone;
 mod power;
@@ -44,7 +45,11 @@ pub struct GuiOptions {
 }
 
 pub fn run(options: GuiOptions) -> Result<()> {
+    // The installed Windows service's user-side backend and its migration
+    // recovery; Linux has no installed service.
+    #[cfg(windows)]
     let _user_backend = crate::platform::windows::host_service::user_backend::Server::start()?;
+    #[cfg(windows)]
     let _migration = crate::platform::windows::components::migration::UserRecovery::start();
     let _shortcuts = crate::application::viewer_shortcuts::Watcher::new()?;
     crate::features::host::displays::fallback::start_background();
@@ -77,6 +82,7 @@ pub fn run(options: GuiOptions) -> Result<()> {
             viewport,
             centered: true,
             notification: false,
+            floating: false,
         },
         Box::new(move |ctx, graphics| {
             configure_visuals(ctx);
@@ -89,6 +95,9 @@ pub fn run(options: GuiOptions) -> Result<()> {
         }),
     )
 }
+/// A Windows toast button relaunches the program with its protocol URI; Linux
+/// desktop notifications report their actions to the running process.
+#[cfg(windows)]
 pub fn notification_activation(uri: &str) -> Result<()> {
     notifications::Action::parse(uri)?;
     instance::deliver_notification(uri)
@@ -736,7 +745,7 @@ impl DeviceCenterApp {
     }
 
     fn begin_login(&mut self) {
-        if self.center_ui.components.busy()
+        if self.maintenance_busy()
             || self.logout_pending
             || self.has_viewers()
             || self.mutation_pending
@@ -811,7 +820,7 @@ impl DeviceCenterApp {
     }
 
     fn logout(&mut self) {
-        if self.center_ui.components.busy()
+        if self.maintenance_busy()
             || self.mutation_pending
             || (self.assist.busy && !self.assist.querying)
         {
@@ -1127,12 +1136,19 @@ impl DeviceCenterApp {
             self.status = StatusMessage::error("设备后台服务已停止");
         }
     }
-    fn prepare_exit(&mut self) {
-        if !self.exit_requested
-            || self.exit_pending
-            || self.exit_ready
-            || self.center_ui.components.busy()
+    /// An install, update or uninstall of the Windows components is running.
+    pub(super) fn maintenance_busy(&self) -> bool {
+        #[cfg(windows)]
         {
+            self.center_ui.components.busy()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+    fn prepare_exit(&mut self) {
+        if !self.exit_requested || self.exit_pending || self.exit_ready || self.maintenance_busy() {
             return;
         }
         self.exit_pending = self.worker.commands.send(GuiCommand::PrepareExit).is_ok();
@@ -1194,6 +1210,7 @@ impl crate::ui::App for DeviceCenterApp {
         self.tick_power();
         self.draw_center(ui);
         self.draw_dialogs(&ctx);
+        #[cfg(windows)]
         self.component_dialogs(&ctx);
         self.prepare_exit();
         if !self.exit_requested && !self.login_restoring && !self.login_running {

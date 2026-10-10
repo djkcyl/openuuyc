@@ -62,7 +62,7 @@ pub(super) struct Reports {
     pub current: AtomicI32,
     pub sequence: Arc<std::sync::atomic::AtomicI64>,
     pub publications: Vec<Mutex<Option<watch::Receiver<Published>>>>,
-    pub pointers: Vec<Arc<Mutex<Option<crate::platform::windows::cursor_shape::Snapshot>>>>,
+    pub pointers: Vec<Arc<Mutex<Option<crate::platform::cursor_shape::Snapshot>>>>,
     pub changed: watch::Sender<u64>,
 }
 impl Reports {

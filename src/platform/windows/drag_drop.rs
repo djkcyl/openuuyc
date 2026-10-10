@@ -39,6 +39,9 @@ pub(crate) struct Position {
     pub x: i32,
     pub y: i32,
 }
+/// The OLE loop of a drag handed off to the peer can be resumed when the
+/// drag re-enters the viewer (`NATIVE_RETURN`).
+pub(crate) const RETURN_CAPABLE: bool = true;
 pub(crate) fn left_held() -> bool {
     unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 }
 }

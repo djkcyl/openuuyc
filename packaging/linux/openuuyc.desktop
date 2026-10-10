@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=OpenUUYC
+GenericName=Remote Desktop
+GenericName[zh_CN]=远程桌面
+Comment=Third-party UU Remote client
+Comment[zh_CN]=UU 远程第三方客户端
+Exec=OpenUUYC
+Icon=openuuyc
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;uu;远程;
+StartupWMClass=OpenUUYC

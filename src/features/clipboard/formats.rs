@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Cursor;
+#[cfg(windows)]
 use windows::{
     Win32::System::DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW},
     core::PCWSTR,
@@ -9,14 +10,122 @@ pub(super) struct Format {
     pub wire: ClipboardFormat,
     pub local: u32,
 }
+#[cfg(windows)]
 pub(super) fn register(name: &str) -> u32 {
     let s: Vec<u16> = name.encode_utf16().chain([0]).collect();
     unsafe { RegisterClipboardFormatW(PCWSTR(s.as_ptr())) }
 }
+#[cfg(windows)]
 pub(super) fn name(id: u32) -> String {
     let mut s = [0u16; 1024];
     let n = unsafe { GetClipboardFormatNameW(id, &mut s) };
     String::from_utf16_lossy(&s[..n.max(0) as usize])
+}
+
+/// The wire protocol speaks Windows clipboard-format ids, so a process-local
+/// registry stands in for the system one: the same name always maps to the same
+/// id within this client, starting at CF_PRIVATEFIRST like Windows does.
+#[cfg(not(windows))]
+fn registry() -> &'static Mutex<(HashMap<String, u32>, HashMap<u32, String>)> {
+    static REGISTRY: std::sync::OnceLock<Mutex<(HashMap<String, u32>, HashMap<u32, String>)>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+#[cfg(not(windows))]
+pub(super) fn register(name: &str) -> u32 {
+    if name.is_empty() {
+        return 0;
+    }
+    let mut registry = lock(registry());
+    if let Some(id) = registry.0.get(name) {
+        return *id;
+    }
+    let id = 0xc000 + registry.0.len() as u32;
+    if id > 0xffff {
+        return 0;
+    }
+    registry.0.insert(name.to_owned(), id);
+    registry.1.insert(id, name.to_owned());
+    id
+}
+
+#[cfg(not(windows))]
+pub(super) fn name(id: u32) -> String {
+    if let Some(name) = standard_name(id) {
+        return name.to_owned();
+    }
+    lock(registry()).1.get(&id).cloned().unwrap_or_default()
+}
+
+/// The predefined CF_* formats this client can name without the system.
+#[cfg(not(windows))]
+const fn standard_name(id: u32) -> Option<&'static str> {
+    Some(match id {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        4 => "CF_SYLK",
+        5 => "CF_DIF",
+        6 => "CF_TIFF",
+        7 => "CF_OEMTEXT",
+        8 => "CF_DIB",
+        9 => "CF_PALETTE",
+        10 => "CF_PENDATA",
+        11 => "CF_RIFF",
+        12 => "CF_WAVE",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        16 => "CF_LOCALE",
+        17 => "CF_DIBV5",
+        _ => return None,
+    })
+}
+
+/// File names arriving from a Windows peer must stay valid Windows names, even
+/// when this client writes them on a filesystem that would accept more.
+pub(super) fn safe_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.encode_utf16().count() < 260
+        && !s.contains(['\0', ':'])
+        && !s.starts_with(['\\', '/'])
+        && s.split(['\\', '/']).all(|p| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && !p.ends_with(['.', ' '])
+                && !p.chars().any(|c| c < ' ' || "<>\"|?*".contains(c))
+                && !matches!(
+                    p.split('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_uppercase()
+                        .as_str(),
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
+                )
+        })
 }
 pub(super) fn file_format(id: u32, name: &str) -> bool {
     id == 15

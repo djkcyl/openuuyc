@@ -12,6 +12,36 @@ autobins = false
 name = "OpenUUYC"
 path = "src/main.rs"
 
+# `cargo deb` (Linux only): the .deb the Linux workflow builds.
+[package.metadata.deb]
+name = "openuuyc"
+maintainer = "DoyoDia <79502694+DoyoDia@users.noreply.github.com>"
+copyright = "OpenUUYC contributors"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Third-party client for UU Remote: sign in with an existing UU account, then \
+view and control remote devices or accept remote control of this desktop \
+(Xorg session)."""
+section = "net"
+priority = "optional"
+# `$auto` covers what the binary links; the windowing, graphics and audio
+# libraries below are loaded at run time and so are named by hand. FUSE
+# serves pasted and dropped remote files; the UI needs a CJK font.
+depends = """$auto, fuse3, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, \
+libxfixes3, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, \
+libvulkan1 | libegl1, \
+fonts-noto-cjk | fonts-wqy-microhei | fonts-arphic-uming"""
+recommends = "libpulse0, libpipewire-0.3-0, gnome-keyring | kwalletmanager"
+suggests = "ethtool"
+assets = [
+    ["target/release/OpenUUYC", "usr/bin/", "755"],
+    ["packaging/linux/openuuyc.desktop", "usr/share/applications/", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/openuuyc.png", "644"],
+    ["README.md", "usr/share/doc/openuuyc/", "644"],
+    ["THIRD_PARTY_NOTICES", "usr/share/doc/openuuyc/", "644"],
+    ["assets/licenses/*", "usr/share/doc/openuuyc/licenses/", "644"],
+]
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
@@ -27,8 +57,8 @@ egui = { version = "0.36.1", default-features = false, features = ["bytemuck"] }
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 goog_cc = { path = "vendor/goog_cc" }
-openuuyc-amf-sys = { path = "vendor/amf-sys" }
-openuuyc-vpl-sys = { path = "vendor/vpl-sys" }
+# NVENC hardware encoding for the host role (driver library loaded at run time).
+openuuyc-nvenc-sys = { path = "vendor/nvenc-sys" }
 hmac = "0.12.1"
 hyper = { version = "1.11.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
@@ -55,11 +85,16 @@ tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 url = "2.5.8"
-uuid = { version = "1.25.0", features = ["v4"] }
+uuid = { version = "1.25.0", features = ["v4", "v5"] }
 webrtc = { path = "vendor/webrtc" }
 webrtc-srtp = "0.17.2"
 yuv = "0.8.17"
 object = { version = "0.37.3", default-features = false, features = ["read_core", "std", "pe"] }
+openuuyc-plugin-api = { path = "plugins/sdk" }
+libloading = "0.8.9"
+openuuyc-codec = { path = "crates/codec" }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 zip = { version = "8.6.0", default-features = false, features = ["zstd"] }
 regex = "1.13.1"
 
@@ -73,13 +108,10 @@ flate2 = "1.1.10"
 openuuyc-bootstrap = { path = "crates/bootstrap" }
 # Required by the generated code of #[windows::core::implement].
 windows-core = "0.62.2"
-openuuyc-plugin-api = { path = "plugins/sdk" }
-openuuyc-codec = { path = "crates/codec" }
-libloading = "0.8.9"
-openuuyc-nvenc-sys = { path = "vendor/nvenc-sys" }
+# The host role's Intel VPL and AMD AMF encoders beside NVENC.
+openuuyc-amf-sys = { path = "vendor/amf-sys" }
+openuuyc-vpl-sys = { path = "vendor/vpl-sys" }
 egui-directx11 = { path = "vendor/egui-directx11" }
-egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 windows = { version = "0.62.2", default-features = false, features = [
     "Foundation",
     "Data_Xml_Dom",
@@ -139,6 +171,32 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Local display geometry for the viewer, on X11 and Wayland alike.
+display-info = "0.5.9"
+cros-libva = { path = "vendor/cros-libva" }
+# The H.264 syntax and its error kinds for the VA-API slice parameters; the
+# software session itself goes through openuuyc-codec like on Windows.
+openuuyc-h264 = { path = "crates/codec/kernels/h264" }
+egui-wgpu = { version = "0.36.1", default-features = false }
+wgpu = { version = "30.0", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "x11", "wayland"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+libc = "0.2"
+fuser = { version = "0.15", default-features = false }
+x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "xtest"] }
+# Notification-area icon (StatusNotifierItem), the counterpart of the Windows tray.
+# zbus must stay on async-io: its tokio feature is global, and makes the
+# blocking Secret Service calls of the keyring panic inside our runtime.
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
+# Desktop notifications (org.freedesktop.Notifications), the counterpart of
+# Windows toasts; the same async-io zbus as above.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+# Host capture through the XDG ScreenCast portal (Wayland, and X11 on request).
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "screencast"] }
+pollster = "0.4"
 
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }

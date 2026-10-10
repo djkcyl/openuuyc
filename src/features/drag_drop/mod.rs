@@ -5,7 +5,7 @@ mod returning;
 use crate::{
     features::clipboard::{self, Clipboard, FileOffer, FileSummary},
     media::capture::Screen,
-    platform::windows::drag_drop as native,
+    platform::drag_drop as native,
     protocol::drag_drop::{self as wire, Packet, Payload, Point},
 };
 use anyhow::{Result, ensure};
@@ -40,6 +40,10 @@ pub(crate) enum Stage {
     Preparing,
     Dragging,
     Submitted,
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "Only the Windows viewer offers the drag return.")
+    )]
     Returning,
     Reading,
     Complete,
@@ -176,6 +180,10 @@ enum Command {
     Prepared(u64, Result<FileSummary, String>),
     Offer(u64, FileOffer, Result<FileSummary, String>),
     Native(u64, native::Event),
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "Only the Windows viewer offers the drag return.")
+    )]
     Resume(u64),
     Image(u64, wire::DragImage),
 }
@@ -487,7 +495,11 @@ impl Actor {
         };
         let data = wire::encode(Packet {
             token: self.token,
-            capabilities: wire::NATIVE_RETURN,
+            capabilities: if native::RETURN_CAPABLE {
+                wire::NATIVE_RETURN
+            } else {
+                0
+            },
             drag: id,
             sequence,
             payload: Some(payload),

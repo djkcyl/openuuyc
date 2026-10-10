@@ -1,8 +1,15 @@
 //! Authenticated controlled-session input ownership.
 mod backend;
+// The installed Windows service's input agent, reached over a named pipe.
+#[cfg(windows)]
 pub(crate) mod broker;
 pub(crate) mod config;
+#[cfg(windows)]
 mod engine;
+#[cfg(target_os = "linux")]
+#[path = "engine_linux.rs"]
+mod engine;
+mod geometry;
 pub(crate) mod wire;
 
 use super::{Lease, lock};
@@ -19,7 +26,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use engine::{Geometry, Screen};
+pub(crate) use geometry::{Geometry, Screen};
 
 // Drain only already queued movement. No batching timer, no summed relative
 // deltas, and no reordering across a key/button/contact boundary.
@@ -71,6 +78,8 @@ struct Gate {
     binding: u64,
     generation: u64,
     faulted: bool,
+    /// Why the last input was dropped, logged when it changes.
+    refused: Option<&'static str>,
     pending: VecDeque<Envelope>,
     executing: Option<(std::time::Instant, usize)>,
     last_execution: Duration,
@@ -255,11 +264,27 @@ impl Receiver {
         if gate.drag_pointer && motion(&event) {
             return;
         }
-        if gate.stream.is_none()
-            || stream.is_some_and(|id| gate.stream != Some(id))
-            || gate.faulted
-            || !self.shared.permitted()
-        {
+        let refused = if gate.stream.is_none() {
+            Some("no input channel bound")
+        } else if stream.is_some_and(|id| gate.stream != Some(id)) {
+            Some("input on an unbound channel")
+        } else if gate.faulted {
+            Some("input generation faulted")
+        } else if !self.shared.permitted() {
+            Some("input not permitted")
+        } else {
+            None
+        };
+        if gate.refused != refused {
+            gate.refused = refused;
+            match refused {
+                Some(reason) => {
+                    tracing::warn!(reason, ?stream, bound = ?gate.stream, "host input dropped")
+                }
+                None => tracing::debug!(?stream, "host input accepted"),
+            }
+        }
+        if refused.is_some() {
             return;
         }
         let item = Envelope {
@@ -317,6 +342,7 @@ fn run(shared: Arc<Shared>, rx: mpsc::Receiver<()>) {
     let mut attempts = 0u8;
     let mut prepare_at = std::time::Instant::now();
     let mut configuration = shared.configuration.subscribe();
+    let mut skipped = None;
     while !shared.cancel.is_cancelled() && shared.lease.requested() {
         let (current, current_binding) = {
             let gate = lock(&shared.gate);
@@ -423,10 +449,24 @@ fn run(shared: Arc<Shared>, rx: mpsc::Receiver<()>) {
         }
         if let Some(item) = item {
             let (item_generation, geometry, events) = lock(&shared.gate).batch(item);
-            if generation != Some(item_generation)
-                || !shared.permitted()
-                || geometry != (shared.geometry)()
-            {
+            let stale = if generation != Some(item_generation) {
+                Some("stale input generation")
+            } else if !shared.permitted() {
+                Some("input not permitted")
+            } else if geometry != (shared.geometry)() {
+                Some("screen layout changed")
+            } else if engine.is_none() {
+                Some("no input backend")
+            } else {
+                None
+            };
+            if stale != skipped {
+                skipped = stale;
+                if let Some(reason) = stale {
+                    tracing::warn!(reason, "host input skipped");
+                }
+            }
+            if stale.is_some() {
                 continue;
             }
             let Some(engine) = engine.as_mut() else {
